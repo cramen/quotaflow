@@ -4,9 +4,11 @@ Guidance for AI agents and contributors working in this repository.
 
 ## Project Overview
 
-**Quotaflow** is an enterprise-grade **distributed rate limiting library for JVM microservices** — the second module of the **Tiercache** family of resilience primitives.
+**Quotaflow** is an enterprise-grade **distributed rate limiting library for JVM microservices**.
 
 Recommended Maven coordinates: groupId `io.quotaflow`, artifact prefix `quotaflow-*`.
+
+Quotaflow is a **standalone, self-contained library**: it has no dependency on Tiercache or any other sibling project. Design patterns (transport layering, configuration model, starter layout, chaos-test harness) may be borrowed from sibling projects, but code is never shared and release cycles are fully independent.
 
 Quotaflow is an **application-layer** library (not an API gateway, not a low-level Redis primitive). It provides:
 
@@ -50,7 +52,7 @@ Explicit non-goals: no own Redis client, not an API gateway / service mesh, no s
 3. **Redis server time** (not client clocks) is used for refill calculations; protect against clock skew between instances.
 4. **Metric cardinality control.** Raw limit keys are never metric tags — only aggregated `key-group`. Raw keys are never logged above DEBUG (risk of leaking tenant/user IDs).
 5. **No blocking on hot paths** in reactive/coroutine modes; virtual-threads-safe (no pinning).
-6. **Zero required dependencies in core** besides SLF4J and `tiercache-core`.
+6. **Zero required dependencies in core** besides SLF4J API.
 
 ## Technology Baseline
 
@@ -68,9 +70,9 @@ Explicit non-goals: no own Redis client, not an API gateway / service mesh, no s
 
 ## Testing and Quality Gates
 
-- Public TCK scenarios TR-01..TR-10 (race condition, boundary burst, Redis degradation, recovery, dynamic config, hierarchy, throttle, weighted requests, virtual-thread stress, metric cardinality) must stay green.
-- Core branch coverage ≥ 90%; mutation testing (PIT) ≥ 80% on correctness paths (F-20..F-32).
-- Benchmarks N-01..N-03 are blocking: ≤ 1 ms p99 added latency on allow (L2 hit), ≥ 50k decisions/s per instance, ≤ 0.01 ms p99 in fallback mode; a > 10% regression blocks the build.
+- The public TCK scenarios (race condition, boundary burst, Redis degradation, recovery, dynamic config, hierarchy, throttle, weighted requests, virtual-thread stress, metric cardinality) must stay green.
+- Core branch coverage ≥ 90%; mutation testing (PIT) ≥ 80% on correctness paths (atomic Lua/GCRA decisions, degradation, fallback).
+- Benchmarks are blocking: ≤ 1 ms p99 added latency on allow (L2 hit), ≥ 50k decisions/s per instance, ≤ 0.01 ms p99 in fallback mode; a > 10% regression blocks the build.
 - Lua scripts must be covered by property-based race tests.
 
 ## Security and Supply Chain
@@ -79,4 +81,4 @@ SBOM (CycloneDX) per release, signed artifacts (Sigstore + PGP), reproducible co
 
 ## Workflow
 
-This repository uses the **OpenSpec** workflow (`openspec/`). Use the project skills (`openspec-propose`, `openspec-apply-change`, `openspec-update-change`, `openspec-sync-specs`, `openspec-archive-change`) for proposing, implementing, and archiving changes. Requirement IDs (F-xx, N-xx, S-xx, TR-xx) from the spec in `research/` are the traceability anchor — reference them in specs, code, and tests.
+This repository uses the **OpenSpec** workflow (`openspec/`). Use the project skills (`openspec-propose`, `openspec-apply-change`, `openspec-update-change`, `openspec-sync-specs`, `openspec-archive-change`) for proposing, implementing, and archiving changes. Requirement IDs from the spec in `research/` are internal to `research/` and `openspec/` — they must NOT appear in repo files, code, or commit messages; describe behavior in plain English instead.

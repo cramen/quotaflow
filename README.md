@@ -1,6 +1,6 @@
 # Quotaflow
 
-Enterprise-grade **distributed rate limiting library for JVM microservices** — the second module of the Tiercache family of resilience primitives.
+Enterprise-grade **distributed rate limiting library for JVM microservices** — a standalone, self-contained library with no framework lock-in in its core.
 
 ## Features (planned)
 
