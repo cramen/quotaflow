@@ -1,0 +1,23 @@
+research/
+openspec/
+
+# Build outputs
+target/
+build/
+out/
+*.class
+*.jar
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+
+# OS
+.DS_Store
+
+# Logs
+*.log
