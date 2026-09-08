@@ -21,6 +21,16 @@ Early development. See `AGENTS.md` for design rules, module layout, and quality 
 - JDK 17+
 - Redis 6.2+ or Valkey (standalone / Sentinel / Cluster)
 
+## Building
+
+Requires JDK 17+ (toolchain); Docker is needed for the Redis-backed tests.
+
+```bash
+./gradlew build
+```
+
+Modules: `quotaflow-core` (framework-free policy engine core), `quotaflow-store-redis` (Lettuce-backed distributed counters), `quotaflow-fallback` (local degradation limiter), `quotaflow-config` (dynamic configuration), `quotaflow-spring-boot-starter` (Spring adapter), `quotaflow-kotlin` (coroutines facade), `quotaflow-tck` (chaos/conformance test suite).
+
 ## License
 
 [Apache License 2.0](LICENSE)

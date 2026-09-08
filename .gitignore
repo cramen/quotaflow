@@ -2,6 +2,7 @@ research/
 openspec/
 
 # Build outputs
+.gradle/
 target/
 build/
 out/

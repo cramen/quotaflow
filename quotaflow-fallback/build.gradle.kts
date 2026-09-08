@@ -1,0 +1,24 @@
+plugins {
+    `java-library`
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+// Runtime classpath allowlist enforced by the dependencyAudit task (see root build).
+extra["dependencyAuditAllowlist"] = listOf("org.slf4j:slf4j-api")
+
+dependencies {
+    api(project(":quotaflow-core"))
+
+    testImplementation(platform(libs.junit.bom))
+    testImplementation(libs.junit.jupiter)
+    testRuntimeOnly(libs.junit.platform.launcher)
+}
+
+tasks.withType<Test> {
+    useJUnitPlatform()
+}

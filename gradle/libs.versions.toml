@@ -1,0 +1,26 @@
+[versions]
+slf4j = "2.0.17"
+lettuce = "7.7.0.RELEASE"
+spring-boot = "3.5.16"
+kotlinx-coroutines = "1.10.2"
+junit = "5.11.4"
+testcontainers = "1.21.4"
+pitest-junit5 = "1.2.1"
+
+[libraries]
+slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
+lettuce-core = { module = "io.lettuce:lettuce-core", version.ref = "lettuce" }
+spring-boot-dependencies = { module = "org.springframework.boot:spring-boot-dependencies", version.ref = "spring-boot" }
+spring-boot-starter = { module = "org.springframework.boot:spring-boot-starter" }
+spring-boot-starter-test = { module = "org.springframework.boot:spring-boot-starter-test" }
+kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinx-coroutines" }
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit" }
+junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
+testcontainers = { module = "org.testcontainers:testcontainers", version.ref = "testcontainers" }
+testcontainers-junit-jupiter = { module = "org.testcontainers:junit-jupiter", version.ref = "testcontainers" }
+pitest-junit5-plugin = { module = "org.pitest:pitest-junit5-plugin", version.ref = "pitest-junit5" }
+
+[plugins]
+jmh = { id = "me.champeau.jmh", version = "0.7.3" }
+pitest = { id = "info.solidsoft.pitest", version = "1.19.0" }
