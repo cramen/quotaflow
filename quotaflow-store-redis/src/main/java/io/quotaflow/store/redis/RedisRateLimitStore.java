@@ -12,9 +12,12 @@ import io.lettuce.core.cluster.api.StatefulRedisClusterConnection;
 import io.quotaflow.core.Algorithm;
 import io.quotaflow.core.Limit;
 import io.quotaflow.core.store.BatchRateLimitStore;
+import io.quotaflow.core.store.BucketState;
 import io.quotaflow.core.store.ChainResult;
 import io.quotaflow.core.store.LevelRequest;
+import io.quotaflow.core.store.StateSeeder;
 import io.quotaflow.core.store.StoreResult;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
@@ -36,7 +39,7 @@ import java.util.concurrent.TimeUnit;
  * timeout, which is validated to be strictly below the business timeout (see
  * {@link RedisStoreConfig}).
  */
-public final class RedisRateLimitStore implements BatchRateLimitStore, AutoCloseable {
+public final class RedisRateLimitStore implements BatchRateLimitStore, StateSeeder, AutoCloseable {
 
     private static final String ALGORITHM_TOKEN_BUCKET = "tb";
     private static final String ALGORITHM_GCRA = "gcra";
@@ -49,6 +52,7 @@ public final class RedisRateLimitStore implements BatchRateLimitStore, AutoClose
     private final LuaScript tokenBucketScript;
     private final LuaScript gcraScript;
     private final LuaScript chainScript;
+    private final LuaScript seedScript;
 
     /** Store over a caller-managed standalone connection; {@link #close()} does not close it. */
     public RedisRateLimitStore(StatefulRedisConnection<String, String> connection, RedisStoreConfig config) {
@@ -97,6 +101,7 @@ public final class RedisRateLimitStore implements BatchRateLimitStore, AutoClose
         this.tokenBucketScript = LuaScript.load("/lua/token_bucket.lua");
         this.gcraScript = LuaScript.load("/lua/gcra.lua");
         this.chainScript = LuaScript.load("/lua/chain.lua");
+        this.seedScript = LuaScript.load("/lua/seed.lua");
     }
 
     @Override
@@ -138,6 +143,36 @@ public final class RedisRateLimitStore implements BatchRateLimitStore, AutoClose
             args[base + 4] = Long.toString(level.weight());
         }
         return evalWithFallback(chainScript, keys, args).thenApply(RedisRateLimitStore::toChainResult);
+    }
+
+    /**
+     * Best-effort recovery seeding: one pipelined {@code seed.lua} execution
+     * per bucket, each merging the local remaining conservatively into the
+     * stored state (never increasing remaining). Keys are mapped exactly like
+     * the chain script maps them, so seeded state is what post-recovery chain
+     * evaluations read. Each write is bounded by the configured command
+     * timeout; the stage completes exceptionally if any write fails.
+     */
+    @Override
+    public CompletionStage<Void> seed(String chainLeafStorageKey, List<BucketState> buckets) {
+        Objects.requireNonNull(chainLeafStorageKey, "chainLeafStorageKey");
+        Objects.requireNonNull(buckets, "buckets");
+        if (buckets.isEmpty()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        List<CompletableFuture<java.util.List<Object>>> writes = new ArrayList<>(buckets.size());
+        for (BucketState bucket : buckets) {
+            String key = keyScheme.chainLevelKey(chainLeafStorageKey, bucket.storageKey());
+            String[] args = {
+                algorithmTag(bucket.algorithm()),
+                Long.toString(bucket.limit().capacity()),
+                Long.toString(bucket.limit().refillAmount()),
+                periodMicros(bucket.limit()),
+                Long.toString(bucket.remaining())
+            };
+            writes.add(evalWithFallback(seedScript, new String[] {key}, args).toCompletableFuture());
+        }
+        return CompletableFuture.allOf(writes.toArray(CompletableFuture[]::new));
     }
 
     @Override

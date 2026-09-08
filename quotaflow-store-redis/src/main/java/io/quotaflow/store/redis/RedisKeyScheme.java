@@ -60,6 +60,15 @@ public final class RedisKeyScheme {
         return keys;
     }
 
+    /**
+     * Key for seeding one level of a chain whose leaf is
+     * {@code leafStorageKey}; identical to the mapping {@link #chainKeys}
+     * applies to that level.
+     */
+    public String chainLevelKey(String leafStorageKey, String levelStorageKey) {
+        return tag(parse(leafStorageKey)) + ':' + rewrittenTail(parse(levelStorageKey));
+    }
+
     private String tag(Parsed leaf) {
         return '{' + leaf.policyId() + ':' + bounded(leaf.rawKey()) + '}';
     }
