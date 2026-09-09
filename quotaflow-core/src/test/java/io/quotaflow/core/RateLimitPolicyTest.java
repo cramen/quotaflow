@@ -18,7 +18,8 @@ class RateLimitPolicyTest {
                 .scope(Scope.USER)
                 .build();
         assertEquals("p", policy.id());
-        assertEquals(LIMIT, policy.limit());
+        assertEquals(LIMIT, policy.limit().orElseThrow());
+        assertTrue(policy.limitRef().isEmpty());
         assertEquals(Algorithm.TOKEN_BUCKET, policy.algorithm());
         assertEquals(Reaction.REJECT, policy.reaction());
         assertEquals(0, policy.priority());
@@ -59,13 +60,38 @@ class RateLimitPolicyTest {
     @Test
     void rejectsMissingComponents() {
         assertThrows(NullPointerException.class,
-                () -> RateLimitPolicy.builder("p").scope(Scope.USER).build());
-        assertThrows(NullPointerException.class,
                 () -> RateLimitPolicy.builder("p").limit(LIMIT).build());
         assertThrows(NullPointerException.class,
                 () -> RateLimitPolicy.builder("p").limit(LIMIT).scope(Scope.USER).algorithm(null).build());
         assertThrows(NullPointerException.class,
                 () -> RateLimitPolicy.builder("p").limit(LIMIT).scope(Scope.USER).reaction(null).build());
+    }
+
+    @Test
+    void limitRefPolicyCarriesNoStaticLimit() {
+        RateLimitPolicy policy = RateLimitPolicy.builder("p")
+                .limitRef("tariff")
+                .scope(Scope.USER)
+                .build();
+        assertTrue(policy.limit().isEmpty());
+        assertEquals("tariff", policy.limitRef().orElseThrow());
+    }
+
+    @Test
+    void declaresExactlyOneLimitSource() {
+        PolicyConfigurationException both = assertThrows(PolicyConfigurationException.class,
+                () -> RateLimitPolicy.builder("p")
+                        .limit(LIMIT).limitRef("tariff").scope(Scope.USER).build());
+        assertTrue(both.getMessage().contains("'p'"));
+        PolicyConfigurationException neither = assertThrows(PolicyConfigurationException.class,
+                () -> RateLimitPolicy.builder("q").scope(Scope.USER).build());
+        assertTrue(neither.getMessage().contains("'q'"));
+    }
+
+    @Test
+    void rejectsBlankLimitRef() {
+        assertThrows(IllegalArgumentException.class,
+                () -> RateLimitPolicy.builder("p").limitRef(" ").scope(Scope.USER).build());
     }
 
     @Test

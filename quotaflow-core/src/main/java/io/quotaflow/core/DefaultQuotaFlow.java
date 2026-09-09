@@ -26,7 +26,8 @@ public final class DefaultQuotaFlow implements QuotaFlow {
 
     private DefaultQuotaFlow(Builder builder) {
         this.policySets = new AtomicReference<>(builder.policySet);
-        this.engine = new PolicyEngine(builder.store, builder.defaultResolver, builder.namedResolvers);
+        this.engine = new PolicyEngine(
+                builder.store, builder.defaultResolver, builder.namedResolvers, builder.limitResolver);
         this.listeners = List.copyOf(builder.listeners);
     }
 
@@ -73,6 +74,7 @@ public final class DefaultQuotaFlow implements QuotaFlow {
         private KeyResolver defaultResolver = KeyResolvers.scopeBased();
         private final Map<String, KeyResolver> namedResolvers = new LinkedHashMap<>();
         private final List<DecisionListener> listeners = new ArrayList<>();
+        private LimitResolver limitResolver;
 
         private Builder(PolicySet policySet, RateLimitStore store) {
             this.policySet = Objects.requireNonNull(policySet, "policySet");
@@ -88,6 +90,15 @@ public final class DefaultQuotaFlow implements QuotaFlow {
         /** Registers a resolver under the id policies reference via {@code keyResolverId}. */
         public Builder addResolver(String id, KeyResolver resolver) {
             namedResolvers.put(Objects.requireNonNull(id, "id"), Objects.requireNonNull(resolver, "resolver"));
+            return this;
+        }
+
+        /**
+         * Resolver for policies declaring a dynamic {@code limitRef}. Expected
+         * to be a caching wrapper; the engine consults it once per resolution.
+         */
+        public Builder limitResolver(LimitResolver limitResolver) {
+            this.limitResolver = Objects.requireNonNull(limitResolver, "limitResolver");
             return this;
         }
 

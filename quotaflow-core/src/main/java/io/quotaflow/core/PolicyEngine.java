@@ -13,6 +13,8 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Evaluates requests against hierarchical policy chains. The entry point
@@ -30,12 +32,23 @@ import java.util.concurrent.CompletionStage;
  *
  * <p>{@link Reaction#THROTTLE} is reserved; throttle policies are currently
  * evaluated exactly like {@link Reaction#REJECT}.
+ *
+ * <p>A policy declaring a dynamic {@code limitRef} has its effective limit
+ * resolved through the configured {@link LimitResolver} during preflight,
+ * before any store evaluation, on both the synchronous and the asynchronous
+ * path; the resolved limit then flows through the unchanged store semantics.
+ * An unresolvable reference rejects the request without a refill schedule,
+ * exactly like an unresolvable key. Policies with a static limit take the
+ * zero-cost path and never touch the resolver.
  */
 public final class PolicyEngine {
+
+    private static final Logger log = LoggerFactory.getLogger(PolicyEngine.class);
 
     private final RateLimitStore store;
     private final KeyResolver defaultResolver;
     private final Map<String, KeyResolver> namedResolvers;
+    private final LimitResolver limitResolver;
 
     /** Engine with the default scope-based resolver and no named resolvers. */
     public PolicyEngine(RateLimitStore store) {
@@ -44,9 +57,23 @@ public final class PolicyEngine {
 
     public PolicyEngine(
             RateLimitStore store, KeyResolver defaultResolver, Map<String, KeyResolver> namedResolvers) {
+        this(store, defaultResolver, namedResolvers, null);
+    }
+
+    /**
+     * Full engine configuration. {@code limitResolver} may be {@code null};
+     * policies declaring a {@code limitRef} then fail evaluation with a
+     * {@link PolicyConfigurationException}.
+     */
+    public PolicyEngine(
+            RateLimitStore store,
+            KeyResolver defaultResolver,
+            Map<String, KeyResolver> namedResolvers,
+            LimitResolver limitResolver) {
         this.store = Objects.requireNonNull(store, "store");
         this.defaultResolver = Objects.requireNonNull(defaultResolver, "defaultResolver");
         this.namedResolvers = Map.copyOf(Objects.requireNonNull(namedResolvers, "namedResolvers"));
+        this.limitResolver = limitResolver;
     }
 
     /**
@@ -73,18 +100,18 @@ public final class PolicyEngine {
         if (store instanceof BatchRateLimitStore batchStore) {
             List<LevelRequest> requests = levelRequests(levels, weight);
             if (requests.isEmpty()) {
-                return missingKeyRejection(levels.get(0));
+                return rejectedBeforeStore(levels.get(0));
             }
             ChainResult result = batchStore.tryAcquireAll(requests).toCompletableFuture().join();
             return batchEvaluation(levels, requests.size(), result);
         }
         long minRemaining = Long.MAX_VALUE;
         for (PendingLevel level : levels) {
-            if (level.missingKey()) {
-                return missingKeyRejection(level);
+            if (!level.reachesStore()) {
+                return rejectedBeforeStore(level);
             }
             StoreResult result =
-                    store.tryAcquire(level.storageKey(), level.policy().limit(), level.policy().algorithm(), weight);
+                    store.tryAcquire(level.storageKey(), level.limit(), level.policy().algorithm(), weight);
             if (!result.acquired()) {
                 return rejection(level, result);
             }
@@ -104,7 +131,7 @@ public final class PolicyEngine {
         if (store instanceof BatchRateLimitStore batchStore) {
             List<LevelRequest> requests = levelRequests(levels, weight);
             if (requests.isEmpty()) {
-                return CompletableFuture.completedFuture(missingKeyRejection(levels.get(0)));
+                return CompletableFuture.completedFuture(rejectedBeforeStore(levels.get(0)));
             }
             return batchStore.tryAcquireAll(requests)
                     .thenApply(result -> batchEvaluation(levels, requests.size(), result));
@@ -114,16 +141,17 @@ public final class PolicyEngine {
 
     /**
      * Store-facing view of the resolved prefix of {@code levels}: a trailing
-     * missing-key level never reaches the store.
+     * pre-store rejection level (missing key or unresolvable limit) never
+     * reaches the store.
      */
     private static List<LevelRequest> levelRequests(List<PendingLevel> levels, long weight) {
         List<LevelRequest> requests = new ArrayList<>(levels.size());
         for (PendingLevel level : levels) {
-            if (level.missingKey()) {
+            if (!level.reachesStore()) {
                 break;
             }
             requests.add(new LevelRequest(
-                    level.storageKey(), level.policy().limit(), level.policy().algorithm(), weight));
+                    level.storageKey(), level.limit(), level.policy().algorithm(), weight));
         }
         return requests;
     }
@@ -131,8 +159,9 @@ public final class PolicyEngine {
     /**
      * Maps an atomic chain outcome onto the same decision the per-level path
      * would produce. {@code resolvedCount} is the number of levels that were
-     * sent to the store; a level beyond it is the trailing missing-key level,
-     * which rejects without a refill schedule after the allowed store levels.
+     * sent to the store; a level beyond it is the trailing pre-store rejection
+     * level, which rejects without a refill schedule after the allowed store
+     * levels.
      */
     private static Evaluation batchEvaluation(
             List<PendingLevel> levels, int resolvedCount, ChainResult result) {
@@ -141,7 +170,7 @@ public final class PolicyEngine {
             return rejection(fired, result.remaining(), result.retryAfterMillis());
         }
         if (resolvedCount < levels.size()) {
-            return missingKeyRejection(levels.get(resolvedCount));
+            return rejectedBeforeStore(levels.get(resolvedCount));
         }
         return allowed(levels.get(result.firedLevelIndex()), result.remaining());
     }
@@ -152,11 +181,11 @@ public final class PolicyEngine {
             return CompletableFuture.completedFuture(allowed(levels.get(levels.size() - 1), minRemaining));
         }
         PendingLevel level = levels.get(index);
-        if (level.missingKey()) {
-            return CompletableFuture.completedFuture(missingKeyRejection(level));
+        if (!level.reachesStore()) {
+            return CompletableFuture.completedFuture(rejectedBeforeStore(level));
         }
         return store
-                .tryAcquireAsync(level.storageKey(), level.policy().limit(), level.policy().algorithm(), weight)
+                .tryAcquireAsync(level.storageKey(), level.limit(), level.policy().algorithm(), weight)
                 .thenCompose(result -> {
                     if (!result.acquired()) {
                         return CompletableFuture.completedFuture(rejection(level, result));
@@ -166,9 +195,10 @@ public final class PolicyEngine {
     }
 
     /**
-     * Resolves the chain and a storage key per level. A missing key with no
-     * configured default short-circuits to a synthetic rejection level that
-     * never reaches the store.
+     * Resolves the chain, a storage key and an effective limit per level. A
+     * missing key with no configured default, or an unresolvable dynamic limit
+     * reference, short-circuits to a synthetic rejection level that never
+     * reaches the store.
      */
     private List<PendingLevel> preflight(PolicySet policies, String leafPolicyId, RateLimitContext context, long weight) {
         if (weight < 1) {
@@ -189,10 +219,34 @@ public final class PolicyEngine {
                 }
             }
             LimitKey key = resolved.get();
+            Limit limit = effectiveLimit(policy, key.keyGroup());
+            if (limit == null) {
+                log.warn(
+                        "policy '{}' limit reference '{}' is unresolvable for key group '{}'; rejecting request",
+                        policy.id(), policy.limitRef().orElseThrow(), key.keyGroup());
+                levels.add(PendingLevel.unresolvableLimit(policy, key.keyGroup()));
+                return levels;
+            }
             String storageKey = policy.id() + ':' + policy.scope().wireName() + ':' + key.rawKey();
-            levels.add(PendingLevel.resolved(policy, storageKey, key.keyGroup()));
+            levels.add(PendingLevel.resolved(policy, storageKey, key.keyGroup(), limit));
         }
         return levels;
+    }
+
+    /**
+     * Effective limit of one level: the static limit at zero cost, or the
+     * {@link LimitResolver} result for a dynamic reference. Returns
+     * {@code null} when the reference cannot be resolved for the key group.
+     */
+    private Limit effectiveLimit(RateLimitPolicy policy, String keyGroup) {
+        if (policy.limitRef().isEmpty()) {
+            return policy.limit().orElseThrow();
+        }
+        if (limitResolver == null) {
+            throw new PolicyConfigurationException("policy '" + policy.id() + "' declares limit reference '"
+                    + policy.limitRef().orElseThrow() + "' but no LimitResolver is configured");
+        }
+        return limitResolver.resolve(policy.limitRef().orElseThrow(), keyGroup).orElse(null);
     }
 
     private KeyResolver resolverFor(RateLimitPolicy policy) {
@@ -221,7 +275,7 @@ public final class PolicyEngine {
         return new Evaluation(decision, level.keyGroup());
     }
 
-    private static Evaluation missingKeyRejection(PendingLevel level) {
+    private static Evaluation rejectedBeforeStore(PendingLevel level) {
         Decision decision =
                 Decision.rejectedWithoutSchedule(level.policy().id(), level.policy().scope());
         return new Evaluation(decision, level.keyGroup());
@@ -237,21 +291,25 @@ public final class PolicyEngine {
         private final RateLimitPolicy policy;
         private final String storageKey;
         private final String keyGroup;
-        private final boolean missingKey;
+        private final Limit limit;
 
-        private PendingLevel(RateLimitPolicy policy, String storageKey, String keyGroup, boolean missingKey) {
+        private PendingLevel(RateLimitPolicy policy, String storageKey, String keyGroup, Limit limit) {
             this.policy = policy;
             this.storageKey = storageKey;
             this.keyGroup = keyGroup;
-            this.missingKey = missingKey;
+            this.limit = limit;
         }
 
-        static PendingLevel resolved(RateLimitPolicy policy, String storageKey, String keyGroup) {
-            return new PendingLevel(policy, storageKey, keyGroup, false);
+        static PendingLevel resolved(RateLimitPolicy policy, String storageKey, String keyGroup, Limit limit) {
+            return new PendingLevel(policy, storageKey, keyGroup, limit);
         }
 
         static PendingLevel missingKey(RateLimitPolicy policy) {
-            return new PendingLevel(policy, null, "unresolvable", true);
+            return new PendingLevel(policy, null, "unresolvable", null);
+        }
+
+        static PendingLevel unresolvableLimit(RateLimitPolicy policy, String keyGroup) {
+            return new PendingLevel(policy, null, keyGroup, null);
         }
 
         RateLimitPolicy policy() {
@@ -266,8 +324,13 @@ public final class PolicyEngine {
             return keyGroup;
         }
 
-        boolean missingKey() {
-            return missingKey;
+        Limit limit() {
+            return limit;
+        }
+
+        /** Levels rejected before store evaluation (missing key, unresolvable limit). */
+        boolean reachesStore() {
+            return limit != null;
         }
     }
 }

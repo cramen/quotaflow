@@ -11,11 +11,17 @@ import java.util.Optional;
  * facade's default scope-based resolver is used. When the key cannot be
  * resolved, the request is rejected unless {@code defaultKey} is explicitly
  * configured, in which case that fixed key is used instead.
+ *
+ * <p>A policy declares exactly one limit source: either a static
+ * {@link #limit()} or a dynamic {@link #limitRef()} resolved at decision time
+ * through the engine's {@link LimitResolver} hook. Declaring both or neither
+ * fails policy construction naming the policy.
  */
 public final class RateLimitPolicy {
 
     private final String id;
     private final Limit limit;
+    private final String limitRef;
     private final Algorithm algorithm;
     private final Scope scope;
     private final Reaction reaction;
@@ -26,7 +32,6 @@ public final class RateLimitPolicy {
 
     private RateLimitPolicy(Builder builder) {
         this.id = requireNonBlank(builder.id, "id");
-        this.limit = Objects.requireNonNull(builder.limit, "limit");
         this.algorithm = Objects.requireNonNull(builder.algorithm, "algorithm");
         this.scope = Objects.requireNonNull(builder.scope, "scope");
         this.reaction = Objects.requireNonNull(builder.reaction, "reaction");
@@ -34,6 +39,17 @@ public final class RateLimitPolicy {
         this.parentId = builder.parentId;
         this.keyResolverId = builder.keyResolverId;
         this.defaultKey = builder.defaultKey;
+        if (builder.limit != null && builder.limitRef != null) {
+            throw new PolicyConfigurationException("policy '" + id
+                    + "' declares both a static limit and a dynamic limit reference '" + builder.limitRef
+                    + "'; exactly one limit source is allowed");
+        }
+        if (builder.limit == null && builder.limitRef == null) {
+            throw new PolicyConfigurationException("policy '" + id
+                    + "' declares neither a static limit nor a dynamic limit reference");
+        }
+        this.limit = builder.limit;
+        this.limitRef = builder.limitRef == null ? null : requireNonBlank(builder.limitRef, "limitRef");
         if (builder.parentId != null && builder.parentId.equals(builder.id)) {
             throw new IllegalArgumentException("policy '" + id + "' must not declare itself as parent");
         }
@@ -47,8 +63,17 @@ public final class RateLimitPolicy {
         return id;
     }
 
-    public Limit limit() {
-        return limit;
+    /** Static limit; empty when the policy declares a dynamic limit reference. */
+    public Optional<Limit> limit() {
+        return Optional.ofNullable(limit);
+    }
+
+    /**
+     * Dynamic limit reference resolved at decision time through the engine's
+     * {@link LimitResolver}; empty when the policy declares a static limit.
+     */
+    public Optional<String> limitRef() {
+        return Optional.ofNullable(limitRef);
     }
 
     public Algorithm algorithm() {
@@ -91,6 +116,7 @@ public final class RateLimitPolicy {
     public static final class Builder {
         private final String id;
         private Limit limit;
+        private String limitRef;
         private Algorithm algorithm = Algorithm.TOKEN_BUCKET;
         private Scope scope;
         private Reaction reaction = Reaction.REJECT;
@@ -105,6 +131,12 @@ public final class RateLimitPolicy {
 
         public Builder limit(Limit limit) {
             this.limit = limit;
+            return this;
+        }
+
+        /** Dynamic limit reference; mutually exclusive with {@link #limit(Limit)}. */
+        public Builder limitRef(String limitRef) {
+            this.limitRef = limitRef;
             return this;
         }
 
