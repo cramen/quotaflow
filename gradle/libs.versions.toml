@@ -6,6 +6,9 @@ kotlinx-coroutines = "1.10.2"
 junit = "5.11.4"
 testcontainers = "1.21.4"
 pitest-junit5 = "1.2.1"
+micrometer = "1.15.5"
+micrometer-tracing = "1.5.5"
+jackson = "2.19.2"
 
 [libraries]
 slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
@@ -20,6 +23,10 @@ junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher
 testcontainers = { module = "org.testcontainers:testcontainers", version.ref = "testcontainers" }
 testcontainers-junit-jupiter = { module = "org.testcontainers:junit-jupiter", version.ref = "testcontainers" }
 pitest-junit5-plugin = { module = "org.pitest:pitest-junit5-plugin", version.ref = "pitest-junit5" }
+micrometer-core = { module = "io.micrometer:micrometer-core", version.ref = "micrometer" }
+micrometer-tracing = { module = "io.micrometer:micrometer-tracing", version.ref = "micrometer-tracing" }
+micrometer-tracing-test = { module = "io.micrometer:micrometer-tracing-test", version.ref = "micrometer-tracing" }
+jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
 
 [plugins]
 jmh = { id = "me.champeau.jmh", version = "0.7.3" }

@@ -18,6 +18,8 @@ extra["dependencyAuditAllowlist"] = listOf(
     "jakarta.annotation:*",
     "org.yaml:snakeyaml",
     "io.micrometer:*",
+    "org.hdrhistogram:HdrHistogram",
+    "org.latencyutils:LatencyUtils",
     "io.lettuce:lettuce-core",
     "io.netty:*",
     "io.projectreactor:reactor-core",
@@ -35,6 +37,7 @@ dependencies {
     implementation(project(":quotaflow-config"))
     implementation(project(":quotaflow-spring-boot-starter"))
     implementation(project(":quotaflow-kotlin"))
+    implementation(project(":quotaflow-micrometer"))
 
     testImplementation(platform(libs.junit.bom))
     testImplementation(libs.junit.jupiter)

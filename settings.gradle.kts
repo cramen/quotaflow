@@ -7,5 +7,6 @@ include(
     "quotaflow-config",
     "quotaflow-spring-boot-starter",
     "quotaflow-kotlin",
+    "quotaflow-micrometer",
     "quotaflow-tck"
 )

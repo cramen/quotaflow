@@ -1,0 +1,45 @@
+# Reference alerting rules for the Quotaflow metric contract (Prometheus rule
+# format). Metric names use Prometheus naming as emitted by the Micrometer
+# Prometheus registry: quotaflow.decisions -> quotaflow_decisions_total,
+# quotaflow.utilization -> quotaflow_utilization, and so on.
+groups:
+  - name: quotaflow
+    rules:
+      # Utilization above 0.8 for five minutes: headroom is shrinking and
+      # rejections are likely to follow.
+      - alert: QuotaflowHighUtilization
+        expr: max by (policy, key_group) (quotaflow_utilization) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Quota {{ $labels.policy }}/{{ $labels.key_group }} above 80% utilization"
+          description: "The {{ $labels.policy }} quota for key-group {{ $labels.key_group }} has stayed above 80% utilization for 5 minutes."
+
+      # Degradation lasting longer than two minutes: decisions are served by
+      # the conservative local fallback, not the distributed store.
+      - alert: QuotaflowDegraded
+        expr: max(quotaflow_degraded) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Quotaflow degraded: serving from local fallback"
+          description: "The distributed store has been unavailable for over 2 minutes; limits are enforced locally with divided quotas."
+
+      # Reject growth: the reject rate more than doubles versus the trailing
+      # one-hour baseline while overall traffic is stable.
+      - alert: QuotaflowRejectGrowth
+        expr: |
+          sum by (policy) (rate(quotaflow_decisions_total{result="reject"}[5m]))
+            > 2 * sum by (policy) (rate(quotaflow_decisions_total{result="reject"}[5m] offset 1h))
+          and sum by (policy) (rate(quotaflow_decisions_total[5m]))
+            > 0.8 * sum by (policy) (rate(quotaflow_decisions_total[5m] offset 1h))
+          and sum by (policy) (rate(quotaflow_decisions_total[5m]))
+            < 1.25 * sum by (policy) (rate(quotaflow_decisions_total[5m] offset 1h))
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Reject rate for {{ $labels.policy }} growing at stable traffic"
+          description: "Rejections for {{ $labels.policy }} more than doubled versus an hour ago while total traffic stayed within 0.8x-1.25x of the baseline."

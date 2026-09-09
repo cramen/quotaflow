@@ -41,6 +41,7 @@ The only exception is the `research/` folder, which holds the original Russian s
 | `quotaflow-config` | Dynamic configuration, hot-reload, tariff resolver SPI |
 | `quotaflow-spring-boot-starter` | `@RateLimited` annotation, filter/interceptor, auto-configuration, 429 semantics |
 | `quotaflow-kotlin` | `suspend`/`Flow`/DSL facade, non-blocking semantics |
+| `quotaflow-micrometer` | Observability adapter: Micrometer metric/tracing bridges over the listener SPIs, reference Grafana dashboard and alerts (Micrometer confined to this module) |
 | TCK module | Chaos/conformance tests (races, degradation, boundary burst, dynamic config) |
 
 Explicit non-goals: no own Redis client, not an API gateway / service mesh, no strong-consistency quotas with distributed transactions, no admin UI (SPI/metrics/REST inspection only).

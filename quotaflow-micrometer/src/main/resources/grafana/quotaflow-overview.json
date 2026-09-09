@@ -1,0 +1,113 @@
+{
+  "uid": "quotaflow-overview",
+  "title": "Quotaflow Overview",
+  "description": "Reference dashboard for the Quotaflow metric contract. Expressions use Prometheus naming as emitted by the Micrometer Prometheus registry (quotaflow.decisions -> quotaflow_decisions_total).",
+  "tags": ["quotaflow", "rate-limiting"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "policy",
+        "type": "query",
+        "datasource": {"type": "prometheus"},
+        "query": "label_values(quotaflow_decisions_total, policy)",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Decisions by result",
+      "description": "Decision rate split by allow/reject per policy and key-group.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (result, policy, key_group) (rate(quotaflow_decisions_total{policy=~\"$policy\"}[5m]))",
+          "legendFormat": "{{result}} {{policy}}/{{key_group}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Utilization",
+      "description": "Last-known consumed capacity (0..1) per policy and key-group. Sustained values above 0.8 warn before rejections begin.",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "fieldConfig": {
+        "defaults": {"min": 0, "max": 1, "unit": "percentunit"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (policy, key_group) (quotaflow_utilization{policy=~\"$policy\"})",
+          "legendFormat": "{{policy}}/{{key_group}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Degraded",
+      "description": "1 while the distributed store is degraded and decisions are served by the local fallback.",
+      "gridPos": {"h": 6, "w": 6, "x": 0, "y": 8},
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {"type": "value", "options": {"0": {"text": "HEALTHY", "color": "green"}}},
+            {"type": "value", "options": {"1": {"text": "DEGRADED", "color": "red"}}}
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(quotaflow_degraded)"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Fallback decisions",
+      "description": "Rate of decisions served by the local fallback while degraded.",
+      "gridPos": {"h": 6, "w": 9, "x": 6, "y": 8},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (policy, key_group) (rate(quotaflow_fallback_decisions_total[5m]))",
+          "legendFormat": "{{policy}}/{{key_group}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Reject ratio",
+      "description": "Share of rejected decisions; growth at stable traffic indicates shrinking headroom.",
+      "gridPos": {"h": 6, "w": 9, "x": 15, "y": 8},
+      "fieldConfig": {
+        "defaults": {"min": 0, "max": 1, "unit": "percentunit"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(quotaflow_decisions_total{result=\"reject\"}[5m])) / sum(rate(quotaflow_decisions_total[5m]))",
+          "legendFormat": "reject ratio"
+        }
+      ]
+    }
+  ]
+}
