@@ -88,7 +88,7 @@ public final class RateLimitPolicy {
         return reaction;
     }
 
-    /** Reserved for throttle prioritization; no effect in reject mode. */
+    /** Default waiter queue priority for throttle-mode acquisitions; no effect in reject mode. */
     public int priority() {
         return priority;
     }

@@ -30,8 +30,10 @@ import org.slf4j.LoggerFactory;
  * contention). Decision semantics — fired level, minimum remaining, retry-after
  * — are identical on both paths.
  *
- * <p>{@link Reaction#THROTTLE} is reserved; throttle policies are currently
- * evaluated exactly like {@link Reaction#REJECT}.
+ * <p>The engine returns pure decisions regardless of {@link Reaction}: a
+ * rejected throttle-mode policy rejects exactly like {@link Reaction#REJECT}
+ * here. Throttle waiting (queueing, retry, wait timeouts) is implemented by
+ * the {@code DefaultQuotaFlow} facade above the engine.
  *
  * <p>A policy declaring a dynamic {@code limitRef} has its effective limit
  * resolved through the configured {@link LimitResolver} during preflight,

@@ -15,6 +15,15 @@ public final class QuotaFlowMetrics {
     /** Counter of decisions served by the local fallback while degraded. */
     public static final String FALLBACK_DECISIONS = "quotaflow.fallback.decisions";
 
+    /** Histogram of time spent waiting in throttle queues (zero-wait included). */
+    public static final String WAIT_DURATION = "quotaflow.wait.duration";
+
+    /** Gauge of throttle waiter queue depth per policy. */
+    public static final String WAIT_QUEUE_DEPTH = "quotaflow.wait.queue.depth";
+
+    /** Counter of throttle waiters rejected because their wait timeout expired. */
+    public static final String WAIT_TIMEOUTS = "quotaflow.wait.timeouts";
+
     public static final String TAG_RESULT = "result";
     public static final String TAG_POLICY = "policy";
     public static final String TAG_KEY_GROUP = "key-group";

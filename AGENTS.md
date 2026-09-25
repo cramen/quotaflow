@@ -67,7 +67,7 @@ Explicit non-goals: no own Redis client, not an API gateway / service mesh, no s
 
 ## Key Metrics (contract names)
 
-`quotaflow.decisions{result=allow|reject|wait, policy, key-group}`, `quotaflow.tokens.remaining{policy}`, `quotaflow.wait.duration`, `quotaflow.degraded`, `quotaflow.fallback.decisions`, `quotaflow.utilization{policy}` (0..1).
+`quotaflow.decisions{result=allow|reject|wait, policy, key-group}`, `quotaflow.tokens.remaining{policy}`, `quotaflow.wait.duration{policy, key-group}`, `quotaflow.wait.queue.depth{policy}`, `quotaflow.wait.timeouts{policy, key-group}`, `quotaflow.degraded`, `quotaflow.fallback.decisions`, `quotaflow.utilization{policy}` (0..1).
 
 ## Testing and Quality Gates
 

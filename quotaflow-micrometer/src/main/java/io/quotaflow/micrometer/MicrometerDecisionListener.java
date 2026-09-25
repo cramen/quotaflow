@@ -7,6 +7,7 @@ import io.quotaflow.core.DecisionListener;
 import io.quotaflow.core.LimitResolver;
 import io.quotaflow.core.PolicySet;
 import io.quotaflow.core.RateLimitPolicy;
+import io.quotaflow.core.ThrottleRejection;
 import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.concurrent.ConcurrentHashMap;
@@ -16,8 +17,11 @@ import java.util.function.Supplier;
 /**
  * Bridges every limiter decision to Micrometer: a
  * {@code quotaflow.decisions} counter tagged with result (allow|reject),
- * policy and key-group, and a last-value {@code quotaflow.utilization} gauge
- * (0..1) per policy and key-group.
+ * policy and key-group, a last-value {@code quotaflow.utilization} gauge
+ * (0..1) per policy and key-group, a {@code quotaflow.wait.duration} timer of
+ * throttle wait time (zero-wait decisions included) per policy and key-group,
+ * and a {@code quotaflow.wait.timeouts} counter of waiters whose wait timeout
+ * expired before they were served.
  *
  * <p>Utilization is derived from the decision stream alone —
  * {@code 1 - remaining / capacity}, where {@code remaining} already travels
@@ -87,6 +91,18 @@ public final class MicrometerDecisionListener implements DecisionListener {
                         QuotaFlowMetrics.TAG_POLICY, decision.policyId(),
                         QuotaFlowMetrics.TAG_KEY_GROUP, keyGroup)
                 .increment();
+        registry.timer(
+                        QuotaFlowMetrics.WAIT_DURATION,
+                        QuotaFlowMetrics.TAG_POLICY, decision.policyId(),
+                        QuotaFlowMetrics.TAG_KEY_GROUP, keyGroup)
+                .record(decision.waitDuration());
+        if (decision.throttleRejection().orElse(null) == ThrottleRejection.WAIT_TIMEOUT) {
+            registry.counter(
+                            QuotaFlowMetrics.WAIT_TIMEOUTS,
+                            QuotaFlowMetrics.TAG_POLICY, decision.policyId(),
+                            QuotaFlowMetrics.TAG_KEY_GROUP, keyGroup)
+                    .increment();
+        }
         OptionalLong capacity = capacityResolver.capacity(decision.policyId(), keyGroup);
         if (capacity.isEmpty() || capacity.orElseThrow() < 1) {
             return;

@@ -108,6 +108,54 @@
           "legendFormat": "reject ratio"
         }
       ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Throttle wait duration",
+      "description": "Average time callers spend queued by throttle policies per policy and key-group (zero-wait decisions included).",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 14},
+      "fieldConfig": {
+        "defaults": {"min": 0, "unit": "s"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (policy, key_group) (rate(quotaflow_wait_duration_seconds_sum{policy=~\"$policy\"}[5m])) / sum by (policy, key_group) (rate(quotaflow_wait_duration_seconds_count{policy=~\"$policy\"}[5m]))",
+          "legendFormat": "{{policy}}/{{key_group}}"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Throttle queue depth",
+      "description": "Waiters currently queued per throttle policy.",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 14},
+      "fieldConfig": {
+        "defaults": {"min": 0}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (policy) (quotaflow_wait_queue_depth{policy=~\"$policy\"})",
+          "legendFormat": "{{policy}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Throttle wait timeouts",
+      "description": "Rate of waiters rejected because their wait timeout expired before they were served.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 22},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (policy, key_group) (rate(quotaflow_wait_timeouts_total{policy=~\"$policy\"}[5m]))",
+          "legendFormat": "{{policy}}/{{key_group}}"
+        }
+      ]
     }
   ]
 }

@@ -19,6 +19,13 @@ public final class RateLimitContext {
     public static final String JWT_CLAIM_PREFIX = "jwt.claim.";
     public static final String HEADER_PREFIX = "header.";
 
+    /**
+     * Call priority for throttled acquisitions (a {@link Number}; higher is
+     * served sooner). Consulted by {@link QuotaFlow#acquire} when no explicit
+     * priority argument is given.
+     */
+    public static final String PRIORITY = "priority";
+
     private static final RateLimitContext EMPTY = new RateLimitContext(Map.of());
 
     private final Map<String, Object> attributes;

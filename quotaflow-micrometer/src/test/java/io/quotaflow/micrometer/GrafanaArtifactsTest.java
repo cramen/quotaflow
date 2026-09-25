@@ -29,6 +29,9 @@ class GrafanaArtifactsTest {
         assertTrue(json.contains("quotaflow_utilization"));
         assertTrue(json.contains("quotaflow_degraded"));
         assertTrue(json.contains("quotaflow_fallback_decisions_total"));
+        assertTrue(json.contains("quotaflow_wait_duration_seconds"));
+        assertTrue(json.contains("quotaflow_wait_queue_depth"));
+        assertTrue(json.contains("quotaflow_wait_timeouts_total"));
     }
 
     @Test
