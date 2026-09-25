@@ -98,7 +98,7 @@ public class QuotaFlowAutoConfiguration {
         }
         try {
             return RedisStoreFactory.connect(properties.getRedis());
-        } catch (RuntimeException e) {
+        } catch (RuntimeException | LinkageError e) {
             if (properties.isFailOnRedisMissing()) {
                 throw new IllegalStateException("could not connect to Redis at '"
                         + properties.getRedis().getUrl() + "' (" + e.getMessage() + ") and"
