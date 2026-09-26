@@ -3,6 +3,7 @@ openspec/
 
 # Build outputs
 .gradle/
+.kotlin/
 target/
 build/
 out/

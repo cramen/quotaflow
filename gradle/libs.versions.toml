@@ -2,6 +2,7 @@
 slf4j = "2.0.17"
 lettuce = "7.7.0.RELEASE"
 spring-boot = "3.5.16"
+kotlin = "2.2.21"
 kotlinx-coroutines = "1.10.2"
 junit = "5.11.4"
 testcontainers = "1.21.4"
@@ -17,6 +18,8 @@ spring-boot-dependencies = { module = "org.springframework.boot:spring-boot-depe
 spring-boot-starter = { module = "org.springframework.boot:spring-boot-starter" }
 spring-boot-starter-test = { module = "org.springframework.boot:spring-boot-starter-test" }
 kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinx-coroutines" }
+kotlinx-coroutines-jdk8 = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-jdk8", version.ref = "kotlinx-coroutines" }
+kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "kotlinx-coroutines" }
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit" }
 junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
 junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
@@ -29,5 +32,6 @@ micrometer-tracing-test = { module = "io.micrometer:micrometer-tracing-test", ve
 jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
 
 [plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
 jmh = { id = "me.champeau.jmh", version = "0.7.3" }
 pitest = { id = "info.solidsoft.pitest", version = "1.19.0" }

@@ -51,6 +51,12 @@ import java.util.concurrent.locks.LockSupport;
  * queue bound across a fleet is instances &times; maxWaitersPerPolicy, so the
  * bound should reflect downstream capacity divided by the expected instance
  * count.
+ *
+ * <p>Cancelling the {@link CompletionStage} returned by {@code acquireAsync}
+ * abandons the wait: the waiter leaves its queue promptly (freeing the slot
+ * for other callers), no quota is consumed and no listener event is fired
+ * for the abandoned wait. Cancellation after the decision finalized has no
+ * effect.
  */
 public final class DefaultQuotaFlow implements QuotaFlow {
 
@@ -116,29 +122,68 @@ public final class DefaultQuotaFlow implements QuotaFlow {
 
     @Override
     public Decision acquire(String policyId, RateLimitContext context, long weight, Duration waitTimeout) {
-        return acquireInternal(policyId, context, weight, waitTimeout, null);
+        return acquireInternal(policyId, context, weight, waitTimeout, null, null);
     }
 
     @Override
     public Decision acquire(
             String policyId, RateLimitContext context, long weight, Duration waitTimeout, int priority) {
-        return acquireInternal(policyId, context, weight, waitTimeout, priority);
+        return acquireInternal(policyId, context, weight, waitTimeout, priority, null);
     }
 
     @Override
     public CompletionStage<Decision> acquireAsync(
             String policyId, RateLimitContext context, long weight, Duration waitTimeout) {
         validateAcquireArgs(weight, waitTimeout);
-        return CompletableFuture.supplyAsync(
-                () -> acquire(policyId, context, weight, waitTimeout), asyncExecutor);
+        return acquireAsyncInternal(policyId, context, weight, waitTimeout, null);
     }
 
     @Override
     public CompletionStage<Decision> acquireAsync(
             String policyId, RateLimitContext context, long weight, Duration waitTimeout, int priority) {
         validateAcquireArgs(weight, waitTimeout);
-        return CompletableFuture.supplyAsync(
-                () -> acquire(policyId, context, weight, waitTimeout, priority), asyncExecutor);
+        return acquireAsyncInternal(policyId, context, weight, waitTimeout, priority);
+    }
+
+    /**
+     * Runs the throttle loop on the async executor under an
+     * {@link AsyncAcquisition} handle. Cancelling the returned future removes
+     * the waiter from its queue promptly: the slot is freed for other callers,
+     * no quota is consumed and no listener event is fired for a decision that
+     * never finalized. Cancellation after normal completion has no effect.
+     */
+    private CompletionStage<Decision> acquireAsyncInternal(
+            String policyId, RateLimitContext context, long weight, Duration waitTimeout,
+            Integer priority) {
+        AsyncAcquisition acquisition = new AsyncAcquisition();
+        CompletableFuture<Decision> result = new CompletableFuture<>() {
+            @Override
+            public boolean cancel(boolean mayInterruptIfRunning) {
+                boolean cancelledNow = super.cancel(mayInterruptIfRunning);
+                if (cancelledNow) {
+                    acquisition.cancel();
+                }
+                return cancelledNow;
+            }
+        };
+        asyncExecutor.execute(() -> {
+            acquisition.attach(Thread.currentThread());
+            try {
+                if (!acquisition.isCancelled()) {
+                    result.complete(
+                            acquireInternal(policyId, context, weight, waitTimeout, priority, acquisition));
+                }
+            } catch (AcquisitionCancelledException e) {
+                // the future is already cancelled and the waiter left its queue
+                // silently; nothing remains to complete
+            } catch (Throwable failure) {
+                result.completeExceptionally(failure);
+            } finally {
+                // never return a thread with a pending interrupt to the pool
+                Thread.interrupted();
+            }
+        });
+        return result;
     }
 
     /**
@@ -147,10 +192,16 @@ public final class DefaultQuotaFlow implements QuotaFlow {
      * until its wake time; only the queue head re-evaluates. Every loop
      * iteration re-reads the current policy set, so hot-reloaded limits and
      * swapped reaction modes govern mid-wait retries.
+     *
+     * <p>When running under an {@link AsyncAcquisition} (the {@code acquireAsync}
+     * path), cancellation of the caller's future unwinds the loop by throwing
+     * {@link AcquisitionCancelledException}: the waiter leaves the queue and no
+     * decision is finalized, so no quota is consumed and no listener event
+     * fires for the abandoned wait.
      */
     private Decision acquireInternal(
             String policyId, RateLimitContext context, long weight, Duration waitTimeout,
-            Integer priority) {
+            Integer priority, AsyncAcquisition acquisition) {
         validateAcquireArgs(weight, waitTimeout);
         long startNanos = System.nanoTime();
         // wraparound-safe: the deadline is only ever used in nano differences
@@ -160,6 +211,12 @@ public final class DefaultQuotaFlow implements QuotaFlow {
         Evaluation lastEvaluation = null;
         RateLimitPolicy lastPolicy = null;
         while (true) {
+            if (acquisition != null && acquisition.isCancelled()) {
+                if (waiter != null) {
+                    queue.remove(waiter);
+                }
+                throw new AcquisitionCancelledException();
+            }
             PolicySet current = policySets.get();
             Evaluation evaluation;
             RateLimitPolicy policy;
@@ -209,11 +266,23 @@ public final class DefaultQuotaFlow implements QuotaFlow {
                             decision.withThrottleRejection(ThrottleRejection.QUEUE_OVERFLOW),
                             evaluation, startNanos);
                 }
+                if (acquisition != null) {
+                    acquisition.register(queue, waiter);
+                    // cancellation may have landed between offer and register
+                    if (acquisition.isCancelled()) {
+                        queue.remove(waiter);
+                        throw new AcquisitionCancelledException();
+                    }
+                }
             } else {
                 waiter.wakeAtNanos = wakeAt(now, decision);
                 waiter.generation = configurationGeneration.get();
             }
             if (!parkUntilDue(queue, waiter)) {
+                if (acquisition != null && acquisition.isCancelled()) {
+                    queue.remove(waiter);
+                    throw new AcquisitionCancelledException();
+                }
                 return finish(queue, waiter,
                         decision.withThrottleRejection(ThrottleRejection.WAIT_TIMEOUT),
                         evaluation, startNanos);
@@ -320,6 +389,54 @@ public final class DefaultQuotaFlow implements QuotaFlow {
     private void notifyListeners(Decision decision, String keyGroup) {
         for (DecisionListener listener : listeners) {
             listener.onDecision(decision, keyGroup);
+        }
+    }
+
+    /**
+     * Cancellation signal shared by an {@code acquireAsync} future and the
+     * worker running its throttle loop. {@link #cancel()} is idempotent: it
+     * removes the registered waiter from its queue (freeing the slot and
+     * waking the next head) and interrupts the worker so a parked wait ends
+     * promptly; the loop observes {@link #isCancelled()} and unwinds without
+     * finalizing a decision.
+     */
+    private static final class AsyncAcquisition {
+        private volatile boolean cancelled;
+        private volatile Thread worker;
+        private volatile WaiterQueue queue;
+        private volatile WaiterQueue.Waiter waiter;
+
+        void attach(Thread worker) {
+            this.worker = worker;
+        }
+
+        void register(WaiterQueue queue, WaiterQueue.Waiter waiter) {
+            this.queue = queue;
+            this.waiter = waiter;
+        }
+
+        boolean isCancelled() {
+            return cancelled;
+        }
+
+        void cancel() {
+            cancelled = true;
+            WaiterQueue registeredQueue = queue;
+            WaiterQueue.Waiter registeredWaiter = waiter;
+            if (registeredQueue != null && registeredWaiter != null) {
+                registeredQueue.remove(registeredWaiter);
+            }
+            Thread attached = worker;
+            if (attached != null) {
+                attached.interrupt();
+            }
+        }
+    }
+
+    /** Unwinds the throttle loop of a cancelled {@code acquireAsync} wait; never escapes the worker. */
+    private static final class AcquisitionCancelledException extends RuntimeException {
+        private AcquisitionCancelledException() {
+            super(null, null, false, false);
         }
     }
 
