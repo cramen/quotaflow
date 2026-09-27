@@ -1,7 +1,9 @@
 package io.quotaflow.spring;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.time.Duration;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.util.ClassUtils;
@@ -9,7 +11,9 @@ import org.springframework.util.ClassUtils;
 /**
  * The starter's test classpath deliberately reproduces the broken netty mix a
  * WebFlux application gets (netty 4.2 core via Lettuce, 4.1 epoll jars via
- * reactor-netty), so the guard can be verified against the real artifacts.
+ * reactor-netty). The guard itself lives in the store module now; these tests
+ * pin the classpath mix and verify that store creation through the starter
+ * delegates to it.
  */
 class RedisStoreFactoryTest {
 
@@ -27,20 +31,31 @@ class RedisStoreFactoryTest {
     }
 
     @Test
-    void disablesEpollWhenTheNativeTransportStackIsIncomplete() {
+    void connectDelegatesToTheStoreModuleGuard() {
         System.clearProperty("io.lettuce.core.epoll");
 
-        RedisStoreFactory.disableIncompleteNativeTransports();
+        assertThatThrownBy(() -> RedisStoreFactory.connect(unreachableRedis()))
+                // unreachable endpoint: connection fails, but only after the delegated guard ran
+                .isInstanceOf(Exception.class);
 
         assertThat(System.getProperty("io.lettuce.core.epoll")).isEqualTo("false");
     }
 
     @Test
-    void respectsAnExplicitUserSetting() {
+    void delegationRespectsAnExplicitUserSetting() {
         System.setProperty("io.lettuce.core.epoll", "true");
 
-        RedisStoreFactory.disableIncompleteNativeTransports();
+        assertThatThrownBy(() -> RedisStoreFactory.connect(unreachableRedis()))
+                .isInstanceOf(Exception.class);
 
         assertThat(System.getProperty("io.lettuce.core.epoll")).isEqualTo("true");
+    }
+
+    private static QuotaFlowProperties.Redis unreachableRedis() {
+        QuotaFlowProperties.Redis properties = new QuotaFlowProperties.Redis();
+        // nothing listens here; the connection attempt fails fast
+        properties.setUrl("redis://localhost:1");
+        properties.setConnectTimeout(Duration.ofMillis(200));
+        return properties;
     }
 }

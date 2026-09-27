@@ -17,6 +17,7 @@ import io.quotaflow.core.store.ChainResult;
 import io.quotaflow.core.store.LevelRequest;
 import io.quotaflow.core.store.StateSeeder;
 import io.quotaflow.core.store.StoreResult;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -47,6 +48,7 @@ public final class RedisRateLimitStore implements BatchRateLimitStore, StateSeed
     private final StatefulConnection<String, String> connection;
     private final RedisScriptingAsyncCommands<String, String> async;
     private final boolean closeConnection;
+    private final RedisClient ownedClient;
     private final RedisStoreConfig config;
     private final RedisKeyScheme keyScheme;
     private final LuaScript tokenBucketScript;
@@ -56,7 +58,7 @@ public final class RedisRateLimitStore implements BatchRateLimitStore, StateSeed
 
     /** Store over a caller-managed standalone connection; {@link #close()} does not close it. */
     public RedisRateLimitStore(StatefulRedisConnection<String, String> connection, RedisStoreConfig config) {
-        this(connection, connection.async(), config, RedisKeyScheme.defaults(), false);
+        this(connection, connection.async(), config, RedisKeyScheme.defaults(), false, null);
     }
 
     /** Store over a caller-managed standalone connection with a custom key scheme. */
@@ -64,27 +66,70 @@ public final class RedisRateLimitStore implements BatchRateLimitStore, StateSeed
             StatefulRedisConnection<String, String> connection,
             RedisStoreConfig config,
             RedisKeyScheme keyScheme) {
-        this(connection, connection.async(), config, keyScheme, false);
+        this(connection, connection.async(), config, keyScheme, false, null);
     }
 
     /** Store over a caller-managed Cluster connection; {@link #close()} does not close it. */
     public RedisRateLimitStore(
             StatefulRedisClusterConnection<String, String> connection, RedisStoreConfig config) {
-        this(connection, connection.async(), config, RedisKeyScheme.defaults(), false);
+        this(connection, connection.async(), config, RedisKeyScheme.defaults(), false, null);
     }
 
     /** Opens a dedicated connection on {@code client}; {@link #close()} closes it. */
     public static RedisRateLimitStore create(RedisClient client, RedisStoreConfig config) {
         Objects.requireNonNull(client, "client");
         StatefulRedisConnection<String, String> connection = client.connect();
-        return new RedisRateLimitStore(connection, connection.async(), config, RedisKeyScheme.defaults(), true);
+        return new RedisRateLimitStore(connection, connection.async(), config, RedisKeyScheme.defaults(), true, null);
     }
 
     /** Opens a dedicated connection on the Cluster {@code client}; {@link #close()} closes it. */
     public static RedisRateLimitStore create(RedisClusterClient client, RedisStoreConfig config) {
         Objects.requireNonNull(client, "client");
         StatefulRedisClusterConnection<String, String> connection = client.connect();
-        return new RedisRateLimitStore(connection, connection.async(), config, RedisKeyScheme.defaults(), true);
+        return new RedisRateLimitStore(connection, connection.async(), config, RedisKeyScheme.defaults(), true, null);
+    }
+
+    /**
+     * Creates a client to {@code url} and opens a dedicated connection on it;
+     * {@link #close()} closes both. Client creation is hardened against an
+     * incomplete netty native-transport stack (see {@link RedisClientFactory}):
+     * such transports are disabled with a warning before Lettuce initializes.
+     * As a last-resort safety net, a linkage failure during initialization
+     * (a broken mix the presence probe could not see, or one the user forced
+     * via an explicit switch) disables both native transports for the rest of
+     * the JVM — Lettuce caches its transport choice in static state, so the
+     * same JVM cannot retry — and surfaces an actionable exception instead of
+     * a bare {@link NoClassDefFoundError}.
+     */
+    public static RedisRateLimitStore connect(String url, RedisStoreConfig config, Duration connectTimeout) {
+        Objects.requireNonNull(connectTimeout, "connectTimeout");
+        try {
+            return connectOnce(url, config, connectTimeout);
+        } catch (LinkageError e) {
+            RedisClientFactory.disableNativeTransports();
+            throw new IllegalStateException("Redis client initialization failed with a linkage error ("
+                    + e + "), indicating a broken netty native-transport mix on the classpath; both"
+                    + " native transports (" + RedisClientFactory.EPOLL_PROPERTY + ", "
+                    + RedisClientFactory.KQUEUE_PROPERTY + ") have been set to false, so newly created"
+                    + " clients in this JVM use NIO — or align the netty native-transport jars with the"
+                    + " netty core version", e);
+        }
+    }
+
+    private static RedisRateLimitStore connectOnce(String url, RedisStoreConfig config, Duration connectTimeout) {
+        RedisClient client = RedisClientFactory.createClient(url, connectTimeout);
+        try {
+            StatefulRedisConnection<String, String> connection = client.connect();
+            return new RedisRateLimitStore(
+                    connection, connection.async(), config, RedisKeyScheme.defaults(), true, client);
+        } catch (RuntimeException | LinkageError e) {
+            try {
+                client.shutdown();
+            } catch (RuntimeException shutdownFailure) {
+                e.addSuppressed(shutdownFailure);
+            }
+            throw e;
+        }
     }
 
     private RedisRateLimitStore(
@@ -92,12 +137,14 @@ public final class RedisRateLimitStore implements BatchRateLimitStore, StateSeed
             RedisScriptingAsyncCommands<String, String> async,
             RedisStoreConfig config,
             RedisKeyScheme keyScheme,
-            boolean closeConnection) {
+            boolean closeConnection,
+            RedisClient ownedClient) {
         this.connection = Objects.requireNonNull(connection, "connection");
         this.async = Objects.requireNonNull(async, "async");
         this.config = Objects.requireNonNull(config, "config");
         this.keyScheme = Objects.requireNonNull(keyScheme, "keyScheme");
         this.closeConnection = closeConnection;
+        this.ownedClient = ownedClient;
         this.tokenBucketScript = LuaScript.load("/lua/token_bucket.lua");
         this.gcraScript = LuaScript.load("/lua/gcra.lua");
         this.chainScript = LuaScript.load("/lua/chain.lua");
@@ -179,6 +226,9 @@ public final class RedisRateLimitStore implements BatchRateLimitStore, StateSeed
     public void close() {
         if (closeConnection) {
             connection.close();
+        }
+        if (ownedClient != null) {
+            ownedClient.shutdown();
         }
     }
 

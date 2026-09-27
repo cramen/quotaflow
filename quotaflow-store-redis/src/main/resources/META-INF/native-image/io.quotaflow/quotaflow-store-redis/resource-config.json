@@ -1,0 +1,10 @@
+{
+  "resources": {
+    "includes": [
+      {"pattern": "\\Qlua/token_bucket.lua\\E"},
+      {"pattern": "\\Qlua/gcra.lua\\E"},
+      {"pattern": "\\Qlua/chain.lua\\E"},
+      {"pattern": "\\Qlua/seed.lua\\E"}
+    ]
+  }
+}

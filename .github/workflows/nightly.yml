@@ -1,0 +1,32 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  # Soak profile (not a per-PR gate): 1 h of sustained mixed traffic with
+  # periodic Redis pause/unpause degradation injection, continuous invariant
+  # assertions, and the absolute latency targets asserted (allow p99 <= 1 ms,
+  # fallback p99 <= 0.01 ms via store-level probes).
+  soak:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Run the 1 h soak profile
+        run: ./gradlew :quotaflow-tck:soakTest -PsoakDurationSeconds=3600 -PsoakAssertLatency=true

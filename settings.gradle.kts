@@ -8,5 +8,6 @@ include(
     "quotaflow-spring-boot-starter",
     "quotaflow-kotlin",
     "quotaflow-micrometer",
-    "quotaflow-tck"
+    "quotaflow-tck",
+    "quotaflow-native-smoke"
 )

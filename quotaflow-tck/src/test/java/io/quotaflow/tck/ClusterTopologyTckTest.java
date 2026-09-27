@@ -28,6 +28,7 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.DockerClientFactory;
+import org.testcontainers.containers.ContainerLaunchException;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.utility.DockerImageName;
 
@@ -45,6 +46,7 @@ class ClusterTopologyTckTest {
 
     private static final int FIRST_PORT = 17000;
     private static final int NODE_COUNT = 6;
+    private static final String CLUSTER_IMAGE = "grokzen/redis-cluster:6.2.14";
 
     private static GenericContainer<?> cluster;
     private static GenericContainer<?> standalone;
@@ -55,18 +57,14 @@ class ClusterTopologyTckTest {
         Assumptions.assumeTrue(
                 DockerClientFactory.instance().isDockerAvailable(), "Docker is not available");
 
-        List<String> portBindings = new ArrayList<>();
-        for (int port = FIRST_PORT; port < FIRST_PORT + NODE_COUNT; port++) {
-            portBindings.add(port + ":" + port);
-        }
         // Fixed host ports: the nodes announce 127.0.0.1:17000-17005 (env IP +
         // INITIAL_PORT), so host port numbers must match the announced ones
-        // for Lettuce topology discovery to work from the test JVM.
-        cluster = new GenericContainer<>(DockerImageName.parse("grokzen/redis-cluster:6.2.14"))
-                .withEnv("IP", "127.0.0.1")
-                .withEnv("INITIAL_PORT", String.valueOf(FIRST_PORT));
-        cluster.setPortBindings(portBindings);
-        cluster.start();
+        // for Lettuce topology discovery to work from the test JVM. The fixed
+        // ports race with the asynchronous reaper of the previous test JVM's
+        // cluster container, so stale containers are removed first and the
+        // start retried while the port range settles.
+        removeStaleClusterContainers();
+        cluster = startWithPortRetry(3);
 
         standalone = new GenericContainer<>(DockerImageName.parse("redis:6.2-alpine"))
                 .withExposedPorts(6379);
@@ -79,6 +77,47 @@ class ClusterTopologyTckTest {
         clusterClient = RedisClusterClient.create(
                 RedisURI.create("127.0.0.1", FIRST_PORT));
         awaitTopologyUsable(Duration.ofSeconds(60));
+    }
+
+    private static GenericContainer<?> startWithPortRetry(int attempts) {
+        ContainerLaunchException lastFailure = null;
+        for (int attempt = 0; attempt < attempts; attempt++) {
+            List<String> portBindings = new ArrayList<>();
+            for (int port = FIRST_PORT; port < FIRST_PORT + NODE_COUNT; port++) {
+                portBindings.add(port + ":" + port);
+            }
+            GenericContainer<?> candidate =
+                    new GenericContainer<>(DockerImageName.parse(CLUSTER_IMAGE))
+                            .withEnv("IP", "127.0.0.1")
+                            .withEnv("INITIAL_PORT", String.valueOf(FIRST_PORT));
+            candidate.setPortBindings(portBindings);
+            try {
+                candidate.start();
+                return candidate;
+            } catch (ContainerLaunchException e) {
+                lastFailure = e;
+                removeStaleClusterContainers();
+                try {
+                    Thread.sleep(2_000);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw e;
+                }
+            }
+        }
+        throw lastFailure;
+    }
+
+    private static void removeStaleClusterContainers() {
+        DockerClientFactory.instance().client()
+                .listContainersCmd()
+                .withShowAll(true)
+                .withAncestorFilter(List.of(CLUSTER_IMAGE))
+                .exec()
+                .forEach(stale -> DockerClientFactory.instance().client()
+                        .removeContainerCmd(stale.getId())
+                        .withForce(true)
+                        .exec());
     }
 
     @AfterAll

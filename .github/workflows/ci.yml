@@ -31,3 +31,64 @@ jobs:
 
       - name: Build, test, and audit dependencies
         run: ./gradlew build dependencyAudit
+
+  # Single designated job for the blocking benchmark gates: throughput >= 50k
+  # decisions/s and p99 gates versus the versioned baselines (see the modules'
+  # benchmarkGate tasks). Not part of the JDK matrix on purpose.
+  benchmarks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Run benchmark gates
+        run: ./gradlew :quotaflow-core:benchmarkGate :quotaflow-store-redis:benchmarkGate
+
+  # Compiles the minimal limiter workload (local decisions + Lua-backed chain
+  # evaluation) to a native image and runs it against a real Redis, proving
+  # the GraalVM reachability metadata is complete. Required like the matrix.
+  native-smoke:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:6.2-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v4
+
+      - name: Set up GraalVM
+        uses: graalvm/setup-graalvm@v1
+        with:
+          java-version: '25'
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Compile and run the native smoke workload
+        run: ./gradlew :quotaflow-native-smoke:nativeRun
+        env:
+          REDIS_URL: redis://localhost:6379
