@@ -42,12 +42,13 @@ tasks.withType<Test> {
 }
 
 // --- JMH: distributed allow-path chain evaluation. Gates (benchmarkGate):
-// throughput >= 50k decisions/s absolutely, plus throughput and p99 latency
-// within 10% of the versioned baseline (benchmark-baseline.json). Refresh the
-// baseline intentionally with -PupdateBenchmarkBaseline; the diff is review-
-// visible. The committed baseline is seeded from a local reference run;
-// refresh it from the CI benchmark runner if its profile differs materially.
-// CI runs the gate in a single designated job (not the JDK matrix).
+// regression beyond 10% versus the versioned baseline (benchmark-baseline.json)
+// always blocks. Absolute spec targets (>= 50k decisions/s, <= 1 ms p99) block
+// only with -PabsoluteBenchmarkGates, which the nightly job sets: shared CI
+// runners vary too much for absolute hardware numbers, while the nightly
+// profile asserts them on a controlled runner. Refresh the baseline
+// intentionally with -PupdateBenchmarkBaseline; the diff is review-visible.
+// The committed baseline is measured on the CI benchmark runner.
 jmh {
     fork = 1
     warmupIterations = 2
@@ -57,9 +58,11 @@ jmh {
 }
 
 val minChainThroughputOpsPerSec = 50_000.0
+val maxChainLatencyP99Ms = 1.0
 val benchmarkRegressionBudget = 0.10
 val benchmarkBaselineFile = layout.projectDirectory.file("benchmark-baseline.json")
 val updateBenchmarkBaseline = providers.gradleProperty("updateBenchmarkBaseline").isPresent
+val absoluteBenchmarkGates = providers.gradleProperty("absoluteBenchmarkGates").isPresent
 
 tasks.register("benchmarkGate") {
     group = "verification"
@@ -87,9 +90,15 @@ tasks.register("benchmarkGate") {
                 "redisChainThroughputOpsPerSec" to (throughput.toDouble() to false),
                 "redisChainLatencyP99Ms" to (latencyP99.toDouble() to true)
             )
-            if (throughput.toDouble() < minChainThroughputOpsPerSec) {
-                failures += "redisChainThroughputOpsPerSec: ${throughput.toDouble()} decisions/s is below" +
-                    " the absolute gate of $minChainThroughputOpsPerSec decisions/s"
+            if (absoluteBenchmarkGates) {
+                if (throughput.toDouble() < minChainThroughputOpsPerSec) {
+                    failures += "redisChainThroughputOpsPerSec: ${throughput.toDouble()} decisions/s is below" +
+                        " the absolute gate of $minChainThroughputOpsPerSec decisions/s"
+                }
+                if (latencyP99.toDouble() > maxChainLatencyP99Ms) {
+                    failures += "redisChainLatencyP99Ms: ${latencyP99.toDouble()} ms is above" +
+                        " the absolute gate of $maxChainLatencyP99Ms ms"
+                }
             }
             if (updateBenchmarkBaseline) {
                 benchmarkBaselineFile.asFile.writeText(
