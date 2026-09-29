@@ -1,86 +1,93 @@
 package io.quotaflow.store.redis;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
+import io.lettuce.core.cluster.SlotHash;
+import io.quotaflow.core.Scope;
+import io.quotaflow.core.store.BucketIdentity;
+import io.quotaflow.core.store.QuotaDomain;
+import java.nio.charset.StandardCharsets;
+import java.util.HashSet;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class RedisKeySchemeTest {
-
     private final RedisKeyScheme scheme = RedisKeyScheme.defaults();
+    private final QuotaDomain domain = new QuotaDomain("deployment", "provider");
 
-    @Test
-    void singleKeyUsesOwnIdentityAsHashTag() {
-        assertEquals("{u:alice}:u:user:alice", scheme.singleKey("u:user:alice"));
+    private BucketIdentity bucket(String policy, Scope scope, String raw) {
+        return new BucketIdentity(domain, policy, scope, raw);
     }
 
     @Test
-    void chainKeysShareTheLeafHashTag() {
-        List<String> keys = scheme.chainKeys(List.of(
-                "g:global:global", "t:tenant:acme", "u:user:alice"));
-        assertEquals(List.of(
-                "{u:alice}:g:global:global",
-                "{u:alice}:t:tenant:acme",
-                "{u:alice}:u:user:alice"), keys);
+    void versionTwoEncodingHasAStableCrossLanguageFixture() {
+        assertEquals("qf:v2:{07c4c3c27f5dc623d4bb86c436620cd5ddc2d96b7b9a5b84d903de742b6e59ea}:af4bac75c45b71ee300dad2a2ab96710d4883462b24a1e740465d1b05488e59c", scheme.singleKey(bucket("tenant", Scope.TENANT, "acme")));
     }
 
     @Test
-    void differentLeavesGetDifferentTagsSoChainsSpreadAcrossSlots() {
-        List<String> alice = scheme.chainKeys(List.of("t:tenant:acme", "u:user:alice"));
-        List<String> bob = scheme.chainKeys(List.of("t:tenant:acme", "u:user:bob"));
-        assertNotEquals(alice.get(0), bob.get(0));
-        assertTrue(alice.get(0).startsWith("{u:alice}:"));
-        assertTrue(bob.get(0).startsWith("{u:bob}:"));
+    void siblingsAndDirectCallsUseOneParentAndOneSlot() {
+        BucketIdentity parent = bucket("provider", Scope.GLOBAL, "shared");
+        BucketIdentity alice = bucket("user", Scope.USER, "alice");
+        BucketIdentity bob = bucket("user", Scope.USER, "bob");
+        List<String> a = scheme.chainKeys(List.of(parent, alice));
+        List<String> b = scheme.chainKeys(List.of(parent, bob));
+        assertEquals(a.get(0), b.get(0));
+        assertEquals(a.get(0), scheme.singleKey(parent));
+        assertEquals(a.get(0), scheme.chainLevelKey(domain, parent));
+        assertNotEquals(a.get(1), b.get(1));
+        int slot = SlotHash.getSlot(a.get(0));
+        for (String key : List.of(a.get(1), b.get(1), scheme.controlKey(domain))) {
+            assertEquals(slot, SlotHash.getSlot(key));
+        }
+        assertFalse(a.contains(scheme.controlKey(domain)));
     }
 
     @Test
-    void sameChainAlwaysMapsToTheSameKeys() {
-        List<String> chain = List.of("t:tenant:acme", "u:user:alice");
-        assertEquals(scheme.chainKeys(chain), scheme.chainKeys(chain));
+    void changingRootRawKeyDoesNotDuplicateDescendant() {
+        BucketIdentity child = bucket("tenant", Scope.TENANT, "same-tenant");
+        assertEquals(scheme.chainKeys(List.of(bucket("provider", Scope.GLOBAL, "one"), child)).get(1),
+                scheme.chainKeys(List.of(bucket("provider", Scope.GLOBAL, "two"), child)).get(1));
     }
 
     @Test
-    void overlongRawKeysAreHashedDeterministically() {
-        RedisKeyScheme tight = new RedisKeyScheme(16);
-        String longRaw = "tenant-" + "x".repeat(200);
-        String key = tight.singleKey("t:tenant:" + longRaw);
-        assertTrue(key.startsWith("{t:sha256:"));
-        assertTrue(key.contains("}:t:tenant:sha256:"));
-        assertEquals(key, tight.singleKey("t:tenant:" + longRaw));
-        assertNotEquals(key, tight.singleKey("t:tenant:" + longRaw + "-other"));
-        // 7 ("{t:sha256:") + 64 (hex) for the tag content plus separators — bounded size
-        assertTrue(key.length() < longRaw.length());
+    void adversarialInputCannotChooseSlotsOrAliasTuples() {
+        List<BucketIdentity> identities = List.of(
+                bucket("p:x", Scope.KEY, "y"), bucket("p", Scope.KEY, "x:y"),
+                bucket("p", Scope.KEY, "{slot}"), bucket("p", Scope.KEY, "sha256:" + "a".repeat(64)),
+                bucket("p", Scope.KEY, "x".repeat(10000)), bucket("p", Scope.KEY, "\uD83D\uDE80"),
+                new BucketIdentity(new QuotaDomain("other", "provider"), "p", Scope.KEY, "y"),
+                new BucketIdentity(new QuotaDomain("deployment", "other"), "p", Scope.KEY, "y"));
+        var keys = new HashSet<String>();
+        for (BucketIdentity identity : identities) {
+            String key = scheme.singleKey(identity);
+            assertEquals(137, key.getBytes(StandardCharsets.US_ASCII).length);
+            assertTrue(key.matches("qf:v2:\\{[0-9a-f]{64}\\}:[0-9a-f]{64}"));
+            assertEquals(key, scheme.singleKey(identity));
+            assertTrue(keys.add(key));
+        }
+        assertNotEquals(scheme.controlKey(domain), scheme.controlKey(new QuotaDomain("deployment", "other")));
+        assertNotEquals(scheme.manifestKey("a:b"), scheme.manifestKey("a"));
     }
 
     @Test
-    void shortRawKeysAreKeptVerbatim() {
-        RedisKeyScheme tight = new RedisKeyScheme(16);
-        assertEquals("{u:short}:u:user:short", tight.singleKey("u:user:short"));
+    void literalLegacyDigestDoesNotAliasTheLongInput() throws Exception {
+        String raw = "x".repeat(10000);
+        String digest = java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                .digest(raw.getBytes(StandardCharsets.UTF_8)));
+        assertNotEquals(scheme.singleKey(bucket("p", Scope.KEY, raw)),
+                scheme.singleKey(bucket("p", Scope.KEY, "sha256:" + digest)));
     }
 
     @Test
-    void malformedStorageKeyRejectedWithoutEchoingIt() {
-        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
-                () -> scheme.singleKey("sensitive-raw-key-without-separators"));
-        assertFalse(e.getMessage().contains("sensitive"));
-    }
-
-    @Test
-    void emptyChainRejected() {
+    void rejectsMixedDomainsAndInvalidArgumentsBeforeExecution() {
+        BucketIdentity one = bucket("p", Scope.KEY, "one");
+        BucketIdentity other = new BucketIdentity(new QuotaDomain("other", "provider"), "p", Scope.KEY, "two");
         assertThrows(IllegalArgumentException.class, () -> scheme.chainKeys(List.of()));
-    }
-
-    @Test
-    void invalidBoundRejected() {
-        assertThrows(IllegalArgumentException.class, () -> new RedisKeyScheme(0));
-    }
-
-    @Test
-    void rawKeyWithColonsStaysInTheTail() {
-        assertEquals("{u:a:b:c}:u:user:a:b:c", scheme.singleKey("u:user:a:b:c"));
+        assertThrows(IllegalArgumentException.class, () -> scheme.chainKeys(List.of(one, other)));
+        assertThrows(IllegalArgumentException.class, () -> scheme.chainLevelKey(domain, other));
+        assertThrows(NullPointerException.class, () -> scheme.singleKey(null));
+        assertThrows(NullPointerException.class, () -> scheme.chainKeys(null));
+        assertThrows(NullPointerException.class, () -> scheme.controlKey(null));
+        assertThrows(IllegalArgumentException.class, () -> scheme.manifestKey(""));
     }
 }

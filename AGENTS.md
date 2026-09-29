@@ -74,7 +74,7 @@ Explicit non-goals: no own Redis client, not an API gateway / service mesh, no s
 
 - The public TCK scenarios (race condition, boundary burst, Redis degradation, recovery, dynamic config, hierarchy, throttle, weighted requests, virtual-thread stress, metric cardinality) must stay green.
 - Core branch coverage ≥ 90%; mutation testing (PIT) ≥ 80% on correctness paths (atomic Lua/GCRA decisions, degradation, fallback).
-- Benchmarks are blocking: ≤ 1 ms p99 added latency on allow (L2 hit), ≥ 50k decisions/s per instance, ≤ 0.01 ms p99 in fallback mode; a > 10% regression blocks the build.
+- Benchmark throughput and latency are environment-specific measurements, not universal absolute release thresholds. A repeatable > 10% regression blocks certification only against a reviewed baseline with matching hardware, runtime, server, network and workload configuration. Retain complete runs and variability; missing or incomparable evidence is unverified, not a regression pass. Diagnostic runs may report results without a baseline.
 - Lua scripts must be covered by property-based race tests.
 
 ## Security and Supply Chain

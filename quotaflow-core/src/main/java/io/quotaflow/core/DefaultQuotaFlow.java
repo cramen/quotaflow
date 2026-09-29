@@ -75,7 +75,8 @@ public final class DefaultQuotaFlow implements QuotaFlow {
     private DefaultQuotaFlow(Builder builder) {
         this.policySets = new AtomicReference<>(builder.policySet);
         this.engine = new PolicyEngine(
-                builder.store, builder.defaultResolver, builder.namedResolvers, builder.limitResolver);
+                builder.store, builder.defaultResolver, builder.namedResolvers, builder.limitResolver, builder.namespace);
+        this.engine.registerPolicies(builder.policySet).toCompletableFuture().join();
         this.listeners = List.copyOf(builder.listeners);
         this.maxWaitersPerPolicy = builder.maxWaitersPerPolicy;
         this.asyncExecutor = builder.asyncExecutor != null ? builder.asyncExecutor : DefaultAsyncExecutor.get();
@@ -87,7 +88,9 @@ public final class DefaultQuotaFlow implements QuotaFlow {
 
     /** Atomically replaces the compiled policy set for subsequent decisions. */
     public void replacePolicySet(PolicySet policySet) {
-        policySets.set(Objects.requireNonNull(policySet, "policySet"));
+        Objects.requireNonNull(policySet, "policySet");
+        engine.registerPolicies(policySet).toCompletableFuture().join();
+        policySets.set(policySet);
         configurationGeneration.incrementAndGet();
         queues.values().forEach(WaiterQueue::signalHead);
     }
@@ -472,12 +475,19 @@ public final class DefaultQuotaFlow implements QuotaFlow {
         private final Map<String, KeyResolver> namedResolvers = new LinkedHashMap<>();
         private final List<DecisionListener> listeners = new ArrayList<>();
         private LimitResolver limitResolver;
+        private String namespace = io.quotaflow.core.store.QuotaDomain.DEFAULT_NAMESPACE;
         private int maxWaitersPerPolicy = 1000;
         private Executor asyncExecutor;
 
         private Builder(PolicySet policySet, RateLimitStore store) {
             this.policySet = Objects.requireNonNull(policySet, "policySet");
             this.store = Objects.requireNonNull(store, "store");
+        }
+
+        /** Deployment namespace; the Redis namespace must be explicitly provisioned before use. */
+        public Builder namespace(String namespace) {
+            this.namespace = new io.quotaflow.core.store.QuotaDomain(namespace, "validation").namespace();
+            return this;
         }
 
         /** Default resolver used for policies without a {@code keyResolverId}. */

@@ -2,6 +2,9 @@ package io.quotaflow.nativesmoke;
 
 import io.quotaflow.core.Algorithm;
 import io.quotaflow.core.Limit;
+import io.quotaflow.core.Scope;
+import io.quotaflow.core.store.QuotaDomain;
+import io.quotaflow.core.store.BucketIdentity;
 import io.quotaflow.core.store.ChainResult;
 import io.quotaflow.core.store.LevelRequest;
 import io.quotaflow.core.store.LocalRateLimitStore;
@@ -24,27 +27,32 @@ public final class NativeSmoke {
 
     public static void main(String[] args) {
         Limit limit = new Limit(2, 1, Duration.ofSeconds(1));
+        String namespace = "native-smoke-" + java.util.UUID.randomUUID();
 
         LocalRateLimitStore local = new LocalRateLimitStore();
-        require(local.tryAcquire("smoke-tb", limit, Algorithm.TOKEN_BUCKET, 1).acquired(),
+        require(local.tryAcquire(new BucketIdentity(new QuotaDomain(namespace, "local"), "smoke-tb", Scope.KEY, "one"), limit, Algorithm.TOKEN_BUCKET, 1).acquired(),
                 "local allow expected");
-        require(local.tryAcquire("smoke-tb", limit, Algorithm.TOKEN_BUCKET, 1).acquired(),
+        require(local.tryAcquire(new BucketIdentity(new QuotaDomain(namespace, "local"), "smoke-tb", Scope.KEY, "one"), limit, Algorithm.TOKEN_BUCKET, 1).acquired(),
                 "local allow expected");
-        require(!local.tryAcquire("smoke-tb", limit, Algorithm.TOKEN_BUCKET, 1).acquired(),
+        require(!local.tryAcquire(new BucketIdentity(new QuotaDomain(namespace, "local"), "smoke-tb", Scope.KEY, "one"), limit, Algorithm.TOKEN_BUCKET, 1).acquired(),
                 "local reject expected once the budget is spent");
-        require(local.tryAcquire("smoke-gcra", limit, Algorithm.GCRA, 1).acquired(),
+        require(local.tryAcquire(new BucketIdentity(new QuotaDomain(namespace, "local"), "smoke-gcra", Scope.KEY, "one"), limit, Algorithm.GCRA, 1).acquired(),
                 "gcra local allow expected");
-        require(local.tryAcquire("smoke-gcra", limit, Algorithm.GCRA, 1).acquired(),
+        require(local.tryAcquire(new BucketIdentity(new QuotaDomain(namespace, "local"), "smoke-gcra", Scope.KEY, "one"), limit, Algorithm.GCRA, 1).acquired(),
                 "gcra local allow expected");
-        require(!local.tryAcquire("smoke-gcra", limit, Algorithm.GCRA, 1).acquired(),
+        require(!local.tryAcquire(new BucketIdentity(new QuotaDomain(namespace, "local"), "smoke-gcra", Scope.KEY, "one"), limit, Algorithm.GCRA, 1).acquired(),
                 "gcra local reject expected once the budget is spent");
 
         String url = System.getenv().getOrDefault("REDIS_URL", "redis://localhost:6379");
+        io.lettuce.core.RedisClient provisioningClient = io.quotaflow.store.redis.RedisClientFactory.createClient(url, Duration.ofSeconds(10));
+        try (var provisioning = provisioningClient.connect()) {
+            new io.quotaflow.store.redis.RedisNamespaceAdmin(provisioning).provisionFresh(namespace, true);
+        } finally { provisioningClient.shutdown(); }
         try (RedisRateLimitStore store =
                 RedisRateLimitStore.connect(url, RedisStoreConfig.defaults(), Duration.ofSeconds(10))) {
             ChainResult result = store.tryAcquireAll(List.of(
-                    new LevelRequest("native-smoke:global:root", limit, Algorithm.TOKEN_BUCKET, 1),
-                    new LevelRequest("native-smoke:tenant:t1", limit, Algorithm.GCRA, 1)))
+                    new LevelRequest(new BucketIdentity(new QuotaDomain(namespace, "root"), "root", Scope.GLOBAL, "global"), limit, Algorithm.TOKEN_BUCKET, 1),
+                    new LevelRequest(new BucketIdentity(new QuotaDomain(namespace, "root"), "tenant", Scope.TENANT, "t1"), limit, Algorithm.GCRA, 1)))
                     .toCompletableFuture().join();
             require(result.acquired(), "distributed chain allow expected");
         }

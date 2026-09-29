@@ -9,11 +9,8 @@ import java.util.concurrent.CompletionStage;
  * store after an outage. Implementations merge conservatively: seeding must
  * never increase the remaining capacity a store already holds for a key.
  *
- * <p>{@code chainLeafStorageKey} identifies the chain the buckets were
- * evaluated under (the storage key of the chain's leaf level), so
- * implementations whose key layout depends on chain identity can address the
- * same state the chain evaluation writes. Buckets evaluated outside a chain
- * use their own storage key as the chain leaf.
+ * <p>The explicit domain groups canonical buckets for replay. No requesting
+ * leaf participates in storage placement.
  */
 @FunctionalInterface
 public interface StateSeeder {
@@ -23,11 +20,11 @@ public interface StateSeeder {
      * completes when the seed writes have been flushed; an exceptional
      * completion signals that recovery must not proceed yet.
      */
-    CompletionStage<Void> seed(String chainLeafStorageKey, List<BucketState> buckets);
+    CompletionStage<Void> seed(QuotaDomain domain, List<BucketState> buckets);
 
     /** A seeder that does nothing, for primaries without seedable state. */
     static StateSeeder noOp() {
-        return (chainLeafStorageKey, buckets) ->
+        return (domain, buckets) ->
                 CompletableFuture.completedFuture(null);
     }
 }

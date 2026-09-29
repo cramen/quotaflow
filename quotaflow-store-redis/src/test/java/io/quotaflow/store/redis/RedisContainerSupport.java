@@ -37,6 +37,14 @@ abstract class RedisContainerSupport {
         }
     }
 
+    @org.junit.jupiter.api.BeforeEach
+    void provisionTestNamespace() {
+        try (StatefulRedisConnection<String, String> connection = client.connect()) {
+            connection.sync().flushdb();
+            new RedisNamespaceAdmin(connection).provisionFresh("default", true);
+        }
+    }
+
     protected static RedisClient client() {
         return client;
     }

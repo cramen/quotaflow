@@ -1,5 +1,8 @@
 package io.quotaflow.core.store;
 
+import static io.quotaflow.testing.TestIdentities.key;
+import io.quotaflow.core.store.BucketIdentity;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import io.quotaflow.core.Algorithm;
@@ -45,7 +48,7 @@ class LocalRateLimitStoreRaceTest {
                 start.await();
                 long mine = 0;
                 for (int i = 0; i < ATTEMPTS_PER_THREAD; i++) {
-                    if (store.tryAcquire("hot-key", LIMIT, algorithm, 1).acquired()) {
+                    if (store.tryAcquire(key("hot-key"), LIMIT, algorithm, 1).acquired()) {
                         mine++;
                     }
                 }

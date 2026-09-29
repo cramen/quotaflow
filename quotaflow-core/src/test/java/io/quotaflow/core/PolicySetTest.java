@@ -10,6 +10,21 @@ import org.junit.jupiter.api.Test;
 
 class PolicySetTest {
 
+    @Test
+    void rootAssociationDoesNotDependOnSelectedLeafOrResolvedAncestorKeys() {
+        PolicySet set = PolicySet.compile(List.of(
+                policy("provider", Scope.GLOBAL),
+                policy("tenant-a", Scope.TENANT, "provider"),
+                policy("tenant-b", Scope.TENANT, "provider"),
+                policy("user", Scope.USER, "tenant-a"),
+                policy("separate", Scope.GLOBAL)));
+        for (String id : List.of("provider", "tenant-a", "tenant-b", "user")) {
+            assertEquals("provider", set.rootPolicyId(id));
+        }
+        assertEquals("separate", set.rootPolicyId("separate"));
+        assertThrows(PolicyConfigurationException.class, () -> set.rootPolicyId("missing"));
+    }
+
     private static RateLimitPolicy policy(String id, Scope scope, String parentId) {
         return RateLimitPolicy.builder(id)
                 .limit(new Limit(10, 1, Duration.ofSeconds(1)))

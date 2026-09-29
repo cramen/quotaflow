@@ -1,5 +1,8 @@
 package io.quotaflow.core.store;
 
+import static io.quotaflow.testing.TestIdentities.key;
+import io.quotaflow.core.store.BucketIdentity;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import io.quotaflow.core.Algorithm;
@@ -66,7 +69,7 @@ class LocalRateLimitStoreParityTest {
         List<StoreResult> results = new ArrayList<>();
         for (Step step : script) {
             nanos.addAndGet(step.advanceMillis() * MILLI);
-            results.add(store.tryAcquire("k", LIMIT, algorithm, step.weight()));
+            results.add(store.tryAcquire(key("k"), LIMIT, algorithm, step.weight()));
         }
         return results;
     }

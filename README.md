@@ -67,6 +67,15 @@ Micrometer: `quotaflow.decisions`, `quotaflow.utilization`, `quotaflow.degraded`
 dashboard and alerting rules ship in the module's `grafana/` resources.
 Metric tags always use aggregated key-groups — never raw keys.
 
+## Quota namespaces and migration
+
+Distributed namespaces must be explicitly provisioned before activation. Configure
+`quotaflow.namespace` (or the core builder's `namespace`) consistently across the
+fleet. See [canonical quota state and migration](docs/canonical-quota-state.md)
+for fresh setup, the breaking store SPI migration, coordinated legacy cutover and
+rollback. A shared policy tree occupies one Redis Cluster slot; capacity planning
+must retain its shared ancestor rather than split it into per-user counters.
+
 ## Building
 
 Requires JDK 17+ (toolchain); Docker is needed for the Redis-backed tests.

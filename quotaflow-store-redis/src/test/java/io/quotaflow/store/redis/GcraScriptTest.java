@@ -1,5 +1,8 @@
 package io.quotaflow.store.redis;
 
+import static io.quotaflow.testing.TestIdentities.key;
+import io.quotaflow.core.store.BucketIdentity;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -26,11 +29,11 @@ class GcraScriptTest extends RedisContainerSupport {
             String key = storageKey("p", "user", "alice");
             Limit limit = new Limit(5, 1, Duration.ofSeconds(1));
             for (int i = 0; i < 5; i++) {
-                StoreResult result = store.tryAcquire(key, limit, Algorithm.GCRA, 1);
+                StoreResult result = store.tryAcquire(key(key), limit, Algorithm.GCRA, 1);
                 assertTrue(result.acquired(), "request " + i + " should be allowed");
                 assertEquals(4 - i, result.remaining());
             }
-            StoreResult rejected = store.tryAcquire(key, limit, Algorithm.GCRA, 1);
+            StoreResult rejected = store.tryAcquire(key(key), limit, Algorithm.GCRA, 1);
             assertFalse(rejected.acquired());
             assertEquals(0, rejected.remaining());
             // the next slot opens one emission interval (1 s) out
@@ -45,10 +48,10 @@ class GcraScriptTest extends RedisContainerSupport {
                 RedisRateLimitStore store = newStore(connection)) {
             String key = storageKey("p", "user", "bob");
             Limit limit = new Limit(1, 2, Duration.ofSeconds(1)); // one slot every 500 ms
-            assertTrue(store.tryAcquire(key, limit, Algorithm.GCRA, 1).acquired());
-            assertFalse(store.tryAcquire(key, limit, Algorithm.GCRA, 1).acquired());
+            assertTrue(store.tryAcquire(key(key), limit, Algorithm.GCRA, 1).acquired());
+            assertFalse(store.tryAcquire(key(key), limit, Algorithm.GCRA, 1).acquired());
             Thread.sleep(600);
-            assertTrue(store.tryAcquire(key, limit, Algorithm.GCRA, 1).acquired());
+            assertTrue(store.tryAcquire(key(key), limit, Algorithm.GCRA, 1).acquired());
         }
     }
 
@@ -58,9 +61,9 @@ class GcraScriptTest extends RedisContainerSupport {
                 RedisRateLimitStore store = newStore(connection)) {
             String key = storageKey("p", "user", "carol");
             Limit limit = new Limit(3, 1, Duration.ofSeconds(1));
-            StoreResult rejected = store.tryAcquire(key, limit, Algorithm.GCRA, 4);
+            StoreResult rejected = store.tryAcquire(key(key), limit, Algorithm.GCRA, 4);
             assertFalse(rejected.acquired());
-            String redisKey = RedisKeyScheme.defaults().singleKey(key);
+            String redisKey = RedisKeyScheme.defaults().singleKey(key(key));
             assertNull(connection.sync().get(redisKey), "a never-admitted key must hold no state");
         }
     }
@@ -71,11 +74,11 @@ class GcraScriptTest extends RedisContainerSupport {
                 RedisRateLimitStore store = newStore(connection)) {
             String key = storageKey("p", "user", "dave");
             Limit limit = new Limit(10, 1, Duration.ofSeconds(1));
-            StoreResult first = store.tryAcquire(key, limit, Algorithm.GCRA, 6);
+            StoreResult first = store.tryAcquire(key(key), limit, Algorithm.GCRA, 6);
             assertTrue(first.acquired());
             assertEquals(4, first.remaining());
-            assertFalse(store.tryAcquire(key, limit, Algorithm.GCRA, 5).acquired());
-            assertTrue(store.tryAcquire(key, limit, Algorithm.GCRA, 4).acquired());
+            assertFalse(store.tryAcquire(key(key), limit, Algorithm.GCRA, 5).acquired());
+            assertTrue(store.tryAcquire(key(key), limit, Algorithm.GCRA, 4).acquired());
         }
     }
 
@@ -85,8 +88,8 @@ class GcraScriptTest extends RedisContainerSupport {
                 RedisRateLimitStore store = newStore(connection)) {
             String key = storageKey("p", "user", "erin");
             Limit limit = new Limit(5, 1, Duration.ofSeconds(1));
-            store.tryAcquire(key, limit, Algorithm.GCRA, 1);
-            String redisKey = RedisKeyScheme.defaults().singleKey(key);
+            store.tryAcquire(key(key), limit, Algorithm.GCRA, 1);
+            String redisKey = RedisKeyScheme.defaults().singleKey(key(key));
             long pttl = connection.sync().pttl(redisKey);
             // TAT sits one emission interval (1 s) in the future
             assertTrue(pttl > 500 && pttl <= 1100, "pttl was " + pttl);
@@ -99,8 +102,8 @@ class GcraScriptTest extends RedisContainerSupport {
                 RedisRateLimitStore store = newStore(connection)) {
             String key = storageKey("p", "user", "frank");
             Limit limit = new Limit(3, 10, Duration.ofSeconds(1)); // 100 ms per token, drain 300 ms
-            store.tryAcquire(key, limit, Algorithm.GCRA, 1);
-            String redisKey = RedisKeyScheme.defaults().singleKey(key);
+            store.tryAcquire(key(key), limit, Algorithm.GCRA, 1);
+            String redisKey = RedisKeyScheme.defaults().singleKey(key(key));
             Thread.sleep(600);
             assertNull(connection.sync().get(redisKey), "drained state should have self-evicted");
         }

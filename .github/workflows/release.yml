@@ -6,7 +6,8 @@ on:
       - 'v*'
 
 jobs:
-  # Full verification — the same gates as CI plus the benchmark gates.
+  # Performance certification must not silently fall back to diagnostic mode.
+  # Profile/baseline provisioning is owned by enforce-release-quality-gates.
   verify:
     runs-on: ubuntu-latest
     steps:
@@ -36,7 +37,7 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Build, test, audit, and run benchmark gates
-        run: ./gradlew build dependencyAudit :quotaflow-core:benchmarkGate :quotaflow-store-redis:benchmarkGate
+        run: ./gradlew build dependencyAudit :quotaflow-core:benchmarkGate :quotaflow-store-redis:benchmarkGate -PrequireBenchmarkComparison
 
   # Publishes all modules in one Central deployment (all-or-none), signs with
   # the project's PGP key, and drafts the GitHub Release with the SBOM.

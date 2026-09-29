@@ -34,9 +34,8 @@ import org.junit.jupiter.api.io.TempDir;
  * file while traffic flows; new decisions honor the changed configuration
  * within one second under the default polling watcher, and every in-flight
  * decision is consistent with exactly one policy set (old or new), never a
- * mix. The two sets use different scopes, so their buckets are disjoint and
- * every decision is attributable to exactly one set by its scope and
- * remaining shape.
+ * mix. The two sets retain scope/root identity and use different resolver keys;
+ * the final listener's key group and remaining shape identify each snapshot.
  */
 class DynamicConfigReloadTckTest {
 
@@ -47,37 +46,33 @@ class DynamicConfigReloadTckTest {
 
     /** Old set: user scope, effectively unlimited (never rejects in-test). */
     private static Map<String, String> relaxedPayload() {
-        return payload("user", 100_000_000, 100_000_000, "PT1S");
+        return payload("relaxed", 100_000_000, 100_000_000, "PT1S");
     }
 
-    /** New set: tenant scope, capacity 1 with a frozen refill. */
+    /** New set: same user policy identity, new resolver key and capacity one. */
     private static Map<String, String> tightenedPayload() {
-        return payload("tenant", 1, 1, "PT1H");
+        return payload("tight", 1, 1, "PT1H");
     }
 
     private static Map<String, String> payload(
-            String scope, long capacity, long refillAmount, String refillPeriod) {
+            String resolver, long capacity, long refillAmount, String refillPeriod) {
         Map<String, String> map = new LinkedHashMap<>();
-        map.put("quotaflow.policies.u.scope", scope);
+        map.put("quotaflow.policies.u.scope", "user");
+        map.put("quotaflow.policies.u.key-resolver", resolver);
         map.put("quotaflow.policies.u.limit.capacity", Long.toString(capacity));
         map.put("quotaflow.policies.u.limit.refill-amount", Long.toString(refillAmount));
         map.put("quotaflow.policies.u.limit.refill-period", refillPeriod);
         return map;
     }
 
-    /**
-     * USER decisions come from the relaxed set (allowed, remaining close to
-     * 100M); TENANT decisions come from the tightened set (capacity 1, so
-     * remaining is always 0). Any other shape proves a mixed-set decision.
-     */
-    private static boolean consistentWithOneSet(Decision decision) {
-        if (decision.scope() == Scope.USER) {
-            return decision.isAllowed() && decision.remaining() > 1_000_000;
-        }
-        if (decision.scope() == Scope.TENANT) {
-            return decision.remaining() == 0;
-        }
-        return false;
+    /** The key-group/remaining pair must belong to one complete snapshot. */
+    private static boolean consistentWithOneSet(Decision decision, String group) {
+        if (decision.scope() != Scope.USER) return false;
+        return switch (group) {
+            case "relaxed" -> decision.isAllowed() && decision.remaining() > 1_000_000;
+            case "tight" -> decision.remaining() == 0;
+            default -> false;
+        };
     }
 
     @TempDir
@@ -87,15 +82,20 @@ class DynamicConfigReloadTckTest {
     void limitChangeAppliesWithinOneSecondWithoutMixedDecisions() throws Exception {
         Path file = dir.resolve("quotaflow.properties");
         write(file, relaxedPayload());
+        AtomicInteger violations = new AtomicInteger();
         DefaultQuotaFlow quotaFlow = DefaultQuotaFlow
                 .builder(ConfigurationParser.parse(relaxedPayload()).policySet(), new LocalRateLimitStore())
+                .addResolver("relaxed", (context, policy) -> java.util.Optional.of(new io.quotaflow.core.LimitKey("old-key", "relaxed")))
+                .addResolver("tight", (context, policy) -> java.util.Optional.of(new io.quotaflow.core.LimitKey("new-key", "tight")))
+                .addListener((decision, group) -> {
+                    if (!consistentWithOneSet(decision, group)) violations.incrementAndGet();
+                })
                 .build();
         ConfigReloader reloader = ConfigReloader
                 .builder(new PropertiesFileConfigSource(file), quotaFlow)
                 .build();
         reloader.start();
         AtomicBoolean running = new AtomicBoolean(true);
-        AtomicInteger violations = new AtomicInteger();
         ExecutorService traffic = Executors.newFixedThreadPool(4);
         try {
             List<Future<?>> workers = startTraffic(traffic, running, violations, quotaFlow);
@@ -121,6 +121,32 @@ class DynamicConfigReloadTckTest {
         }
     }
 
+    @Test
+    void identityChangingReloadPreservesThePreviousPolicyAndDebt() throws Exception {
+        Path file = dir.resolve("identity.properties");
+        var original = new LinkedHashMap<String, String>();
+        original.put("quotaflow.policies.u.scope", "user");
+        original.put("quotaflow.policies.u.limit.capacity", "2");
+        original.put("quotaflow.policies.u.limit.refill-amount", "1");
+        original.put("quotaflow.policies.u.limit.refill-period", "PT1H");
+        write(file, original);
+        var flow = DefaultQuotaFlow.builder(ConfigurationParser.parse(original).policySet(), new LocalRateLimitStore()).build();
+        AtomicInteger hooks = new AtomicInteger();
+        try (var reloader = ConfigReloader.builder(new PropertiesFileConfigSource(file), flow)
+                .pollInterval(Duration.ZERO).onApplied(hooks::incrementAndGet).build()) {
+            assertEquals(1, flow.tryAcquire("u", ALICE).remaining());
+            var conflicting = new LinkedHashMap<>(original);
+            conflicting.put("quotaflow.policies.u.scope", "tenant");
+            conflicting.put("quotaflow.policies.u.limit.capacity", "100");
+            write(file, conflicting);
+            org.junit.jupiter.api.Assertions.assertFalse(reloader.reload().applied());
+            assertEquals(0, hooks.get());
+            var decision = flow.tryAcquire("u", ALICE);
+            assertEquals(Scope.USER, decision.scope());
+            assertEquals(0, decision.remaining());
+        }
+    }
+
     private static List<Future<?>> startTraffic(
             ExecutorService traffic, AtomicBoolean running, AtomicInteger violations,
             DefaultQuotaFlow quotaFlow) {
@@ -130,10 +156,7 @@ class DynamicConfigReloadTckTest {
             workers.add(traffic.submit(() -> {
                 started.await();
                 while (running.get()) {
-                    Decision decision = quotaFlow.tryAcquire("u", ALICE);
-                    if (!consistentWithOneSet(decision)) {
-                        violations.incrementAndGet();
-                    }
+                    quotaFlow.tryAcquire("u", ALICE);
                 }
                 return null;
             }));
@@ -142,13 +165,13 @@ class DynamicConfigReloadTckTest {
         return workers;
     }
 
-    /** Waits until decisions visibly run on the tightened set (TENANT scope rejecting). */
+    /** Waits until decisions visibly run on the tightened set (same USER identity, tightened capacity rejecting). */
     private static long awaitNewSet(DefaultQuotaFlow quotaFlow, Duration timeout)
             throws InterruptedException {
         long deadline = System.nanoTime() + timeout.toNanos();
         while (System.nanoTime() < deadline) {
             Decision decision = quotaFlow.tryAcquire("u", ALICE);
-            if (decision.scope() == Scope.TENANT && !decision.isAllowed()) {
+            if (decision.scope() == Scope.USER && decision.remaining() == 0 && !decision.isAllowed()) {
                 return System.nanoTime();
             }
             Thread.sleep(5);

@@ -18,31 +18,37 @@ import org.junit.jupiter.api.Test;
 /**
  * While the compiled set is being swapped, every individual decision must be
  * consistent with exactly one set (old or new), never a mix. The two sets
- * differ in scope and capacity, so a mixed decision would be detectable:
- * a USER decision can never report remaining above 2, a TENANT decision never
- * above 5.
+ * differ in resolver and capacity (scope/root identity is immutable). A small
+ * key-group decision cannot report remaining above 2; a large one above 5.
  */
 class PolicySetSwapConcurrencyTest {
 
     private static PolicySet userSet() {
         return PolicySet.compile(List.of(RateLimitPolicy.builder("p")
                 .limit(new Limit(3, 1, Duration.ofHours(1)))
-                .scope(Scope.USER)
+                .scope(Scope.USER).keyResolverId("small")
                 .build()));
     }
 
     private static PolicySet tenantSet() {
         return PolicySet.compile(List.of(RateLimitPolicy.builder("p")
                 .limit(new Limit(6, 1, Duration.ofHours(1)))
-                .scope(Scope.TENANT)
+                .scope(Scope.USER).keyResolverId("large")
                 .build()));
     }
 
     @Test
     void decisionsAlwaysUseOneConsistentSetDuringReplacement() throws Exception {
         AtomicLong nanos = new AtomicLong();
+        AtomicInteger violations = new AtomicInteger();
         DefaultQuotaFlow quotaFlow = DefaultQuotaFlow.builder(
                         userSet(), new LocalRateLimitStore(nanos::get))
+                .addResolver("small", (context, policy) -> java.util.Optional.of(new LimitKey("small", "small")))
+                .addResolver("large", (context, policy) -> java.util.Optional.of(new LimitKey("large", "large")))
+                .addListener((decision, group) -> {
+                    long maximum = group.equals("small") ? 2 : 5;
+                    if (decision.remaining() > maximum) violations.incrementAndGet();
+                })
                 .build();
         RateLimitContext context = RateLimitContext.builder()
                 .put(RateLimitContext.PRINCIPAL, "alice")
@@ -53,7 +59,6 @@ class PolicySetSwapConcurrencyTest {
         int decisionsPerThread = 5_000;
         ExecutorService pool = Executors.newFixedThreadPool(threads);
         CountDownLatch start = new CountDownLatch(1);
-        AtomicInteger violations = new AtomicInteger();
         List<Future<?>> futures = new ArrayList<>();
         for (int t = 0; t < threads; t++) {
             futures.add(pool.submit(() -> {
@@ -61,8 +66,7 @@ class PolicySetSwapConcurrencyTest {
                 for (int i = 0; i < decisionsPerThread; i++) {
                     Decision decision = quotaFlow.tryAcquire("p", context);
                     boolean consistent = switch (decision.scope()) {
-                        case USER -> decision.remaining() <= 2 && decision.policyId().equals("p");
-                        case TENANT -> decision.remaining() <= 5 && decision.policyId().equals("p");
+                        case USER -> decision.remaining() <= 5 && decision.policyId().equals("p");
                         default -> false;
                     };
                     if (!consistent) {

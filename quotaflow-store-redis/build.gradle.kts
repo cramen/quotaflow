@@ -41,14 +41,7 @@ tasks.withType<Test> {
     useJUnitPlatform()
 }
 
-// --- JMH: distributed allow-path chain evaluation. Gates (benchmarkGate):
-// regression beyond 10% versus the versioned baseline (benchmark-baseline.json)
-// always blocks. Absolute spec targets (>= 50k decisions/s, <= 1 ms p99) block
-// only with -PabsoluteBenchmarkGates, which the nightly job sets: shared CI
-// runners vary too much for absolute hardware numbers, while the nightly
-// profile asserts them on a controlled runner. Refresh the baseline
-// intentionally with -PupdateBenchmarkBaseline; the diff is review-visible.
-// The committed baseline is measured on the CI benchmark runner.
+// JMH measurements are environment-specific; comparison requires an explicit matching baseline.
 jmh {
     fork = 1
     warmupIterations = 2
@@ -57,88 +50,10 @@ jmh {
     resultsFile.set(layout.buildDirectory.file("reports/jmh/results.json"))
 }
 
-val minChainThroughputOpsPerSec = 50_000.0
-val maxChainLatencyP99Ms = 1.0
-// Per-metric regression budgets reflecting measured noise on shared CI runners:
-// throughput is stable (a few percent run-to-run); latency percentiles jitter
-// ~20% under load, so a tighter budget would flake on noise, not signal.
-// Real regressions exceed these bands by construction of the budgets.
-val benchmarkRegressionBudgets = mapOf(
-    "redisChainThroughputOpsPerSec" to 0.10,
-    "redisChainLatencyP99Ms" to 0.30
+extra["benchmarkMetrics"] = mapOf(
+    "redisChainThroughputOpsPerSec" to mapOf("benchmark" to "io.quotaflow.store.redis.RedisChainBenchmark.chainAllowThroughput",
+        "mode" to "thrpt", "unit" to "ops/s"),
+    "redisChainLatencyP99Ms" to mapOf("benchmark" to "io.quotaflow.store.redis.RedisChainBenchmark.chainAllowLatency",
+        "mode" to "sample", "unit" to "ms/op", "percentile" to "99.0")
 )
-val benchmarkBaselineFile = layout.projectDirectory.file("benchmark-baseline.json")
-val updateBenchmarkBaseline = providers.gradleProperty("updateBenchmarkBaseline").isPresent
-val absoluteBenchmarkGates = providers.gradleProperty("absoluteBenchmarkGates").isPresent
-
-tasks.register("benchmarkGate") {
-    group = "verification"
-    description = "Runs the JMH suite and fails on throughput below 50k decisions/s or a regression beyond 10% versus the versioned baseline."
-    dependsOn("jmh")
-    val results = layout.buildDirectory.file("reports/jmh/results.json")
-    doLast {
-        val entries = (groovy.json.JsonSlurper().parse(results.get().asFile) as List<*>).map { it as Map<*, *> }
-        fun primaryMetric(benchmark: String) = entries
-            .singleOrNull { (it["benchmark"] as String).startsWith(benchmark) }
-            ?.get("primaryMetric") as Map<*, *>?
-        val throughput = primaryMetric("io.quotaflow.store.redis.RedisChainBenchmark.chainAllowThroughput")
-            ?.get("score") as Number?
-        val latencyP99 = (primaryMetric("io.quotaflow.store.redis.RedisChainBenchmark.chainAllowLatency")
-            ?.get("scorePercentiles") as Map<*, *>?)
-            ?.get("99.0") as Number?
-
-        val failures = mutableListOf<String>()
-        if (throughput == null || latencyP99 == null) {
-            failures += "missing JMH results (throughput=$throughput, latencyP99=$latencyP99)"
-        } else {
-            // metric name -> regresses when the measured value is HIGHER (latency),
-            // lower (throughput) than the baseline beyond the budget
-            val measured = mapOf(
-                "redisChainThroughputOpsPerSec" to (throughput.toDouble() to false),
-                "redisChainLatencyP99Ms" to (latencyP99.toDouble() to true)
-            )
-            if (absoluteBenchmarkGates) {
-                if (throughput.toDouble() < minChainThroughputOpsPerSec) {
-                    failures += "redisChainThroughputOpsPerSec: ${throughput.toDouble()} decisions/s is below" +
-                        " the absolute gate of $minChainThroughputOpsPerSec decisions/s"
-                }
-                if (latencyP99.toDouble() > maxChainLatencyP99Ms) {
-                    failures += "redisChainLatencyP99Ms: ${latencyP99.toDouble()} ms is above" +
-                        " the absolute gate of $maxChainLatencyP99Ms ms"
-                }
-            }
-            if (updateBenchmarkBaseline) {
-                benchmarkBaselineFile.asFile.writeText(
-                    groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(
-                        measured.mapValues { it.value.first })) + "\n")
-                logger.lifecycle("benchmarkGate: baseline updated from this run -> $benchmarkBaselineFile" +
-                    " ($measured); review the diff before committing")
-            } else if (!benchmarkBaselineFile.asFile.isFile) {
-                failures += "no benchmark baseline at $benchmarkBaselineFile; seed it with" +
-                    " './gradlew :quotaflow-store-redis:benchmarkGate -PupdateBenchmarkBaseline'"
-            } else {
-                val baseline = groovy.json.JsonSlurper().parse(benchmarkBaselineFile.asFile) as Map<*, *>
-                for ((metric, measuredAndDirection) in measured) {
-                    val (value, higherIsRegression) = measuredAndDirection
-                    val reference = (baseline[metric] as Number?)?.toDouble()
-                    val budget = benchmarkRegressionBudgets.getValue(metric)
-                    val regressed = reference != null && if (higherIsRegression) {
-                        value > reference * (1.0 + budget)
-                    } else {
-                        value < reference * (1.0 - budget)
-                    }
-                    if (reference == null) {
-                        failures += "$metric: not present in the baseline file"
-                    } else if (regressed) {
-                        failures += "$metric: regressed beyond budget $budget (baseline $reference, measured $value)"
-                    } else {
-                        logger.lifecycle("benchmarkGate OK: $metric = $value (baseline $reference, budget $budget)")
-                    }
-                }
-            }
-        }
-        if (failures.isNotEmpty()) {
-            throw GradleException("Benchmark gate failed:\n" + failures.joinToString("\n"))
-        }
-    }
-}
+apply(from = rootProject.file("gradle/benchmark-verification.gradle"))

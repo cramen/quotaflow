@@ -1,5 +1,8 @@
 package io.quotaflow.tck;
 
+import static io.quotaflow.testing.TestIdentities.key;
+import io.quotaflow.core.store.BucketIdentity;
+
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.lettuce.core.RedisClient;
@@ -72,6 +75,10 @@ class DegradationChaosTckTest {
         Assumptions.assumeTrue(
                 DockerClientFactory.instance().isDockerAvailable(), "Docker is not available");
         REDIS.start();
+        RedisClient provisioning = RedisClient.create("redis://" + REDIS.getHost() + ":" + REDIS.getMappedPort(6379));
+        try (var connection = provisioning.connect()) {
+            new io.quotaflow.store.redis.RedisNamespaceAdmin(connection).provisionFresh("default", true);
+        } finally { provisioning.shutdown(); }
     }
 
     @AfterAll
@@ -124,7 +131,7 @@ class DegradationChaosTckTest {
         private volatile boolean throttled;
 
         LoadHarness(String storageKey, Limit limit) {
-            this.chain = List.of(new LevelRequest(storageKey, limit, Algorithm.TOKEN_BUCKET, 1));
+            this.chain = List.of(new LevelRequest(key(storageKey), limit, Algorithm.TOKEN_BUCKET, 1));
             String uri = "redis://" + REDIS.getHost() + ":" + REDIS.getMappedPort(6379);
             for (int i = 0; i < INSTANCES; i++) {
                 RedisClient client = RedisClient.create(uri);
@@ -270,10 +277,10 @@ class DegradationChaosTckTest {
                 // outage under load: the local buckets are drained when the store returns
                 Thread.sleep(3_000);
 
-                // Simulate the store returning with amnesia (data loss on
-                // restart): suspend load so no probe can fire, resume the
-                // server and wipe all state. Without seeding, post-recovery
-                // buckets would be full and the burst would fail the bound.
+                // Simulate lost quota buckets while retaining the authoritative
+                // namespace identity registry. Lost registry metadata is a
+                // separate configuration failure, not a valid recovery probe.
+                // Without seeding, fresh buckets would violate the burst bound.
                 load.throttle();
                 Thread.sleep(500); // in-flight calls settle (store timeout is 200 ms)
             } finally {
@@ -281,8 +288,10 @@ class DegradationChaosTckTest {
             }
             RedisClient admin = RedisClient.create(
                     "redis://" + REDIS.getHost() + ":" + REDIS.getMappedPort(6379));
-            try {
-                admin.connect().sync().flushall();
+            try (var connection = admin.connect()) {
+                for (String bucket : connection.sync().keys("qf:v2:{*}:*")) {
+                    if (!bucket.endsWith(":control")) connection.sync().del(bucket);
+                }
             } finally {
                 admin.shutdown();
             }

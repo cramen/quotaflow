@@ -38,6 +38,17 @@ abstract class TckContainers {
         CLIENTS.forEach(RedisClient::shutdown);
     }
 
+    @org.junit.jupiter.api.BeforeEach
+    void provisionTestNamespaces() {
+        for (String uri : List.of(redisUri(), valkeyUri())) {
+            RedisClient client = newClient(uri);
+            try (var connection = client.connect()) {
+                connection.sync().flushdb();
+                new io.quotaflow.store.redis.RedisNamespaceAdmin(connection).provisionFresh("default", true);
+            }
+        }
+    }
+
     protected static String redisUri() {
         return "redis://" + REDIS.getHost() + ":" + REDIS.getMappedPort(6379);
     }

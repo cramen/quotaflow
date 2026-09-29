@@ -1,5 +1,8 @@
 package io.quotaflow.core.store;
 
+import static io.quotaflow.testing.TestIdentities.key;
+import io.quotaflow.core.store.BucketIdentity;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -33,7 +36,7 @@ class LocalRateLimitStoreBatchTest {
     private final LocalRateLimitStore store = new LocalRateLimitStore(nanos::get);
 
     private static LevelRequest level(String key, Limit limit, Algorithm algorithm, long weight) {
-        return new LevelRequest(key, limit, algorithm, weight);
+        return new LevelRequest(key(key), limit, algorithm, weight);
     }
 
     private static ChainResult join(LocalRateLimitStore store, List<LevelRequest> chain) {
@@ -52,7 +55,7 @@ class LocalRateLimitStoreBatchTest {
         assertEquals(4, result.remaining());
         assertEquals(0, result.retryAfterMillis());
         // the chain already deducted one token at the parent: one more acquisition leaves 8 of 10
-        StoreResult parent = store.tryAcquire("p:global:g", parentLimit, Algorithm.TOKEN_BUCKET, 1);
+        StoreResult parent = store.tryAcquire(key("p:global:g"), parentLimit, Algorithm.TOKEN_BUCKET, 1);
         assertEquals(8, parent.remaining());
     }
 
@@ -61,7 +64,7 @@ class LocalRateLimitStoreBatchTest {
         Limit parentLimit = new Limit(10, 1, Duration.ofMillis(1));
         // drain the child bucket completely
         for (int i = 0; i < 5; i++) {
-            assertTrue(store.tryAcquire("c:tenant:t", LIMIT, Algorithm.TOKEN_BUCKET, 1).acquired());
+            assertTrue(store.tryAcquire(key("c:tenant:t"), LIMIT, Algorithm.TOKEN_BUCKET, 1).acquired());
         }
         ChainResult result = join(store, List.of(
                 level("p:global:g", parentLimit, Algorithm.TOKEN_BUCKET, 1),
@@ -71,7 +74,7 @@ class LocalRateLimitStoreBatchTest {
         assertEquals(0, result.remaining());
         assertEquals(1, result.retryAfterMillis());
         // the parent must be untouched: a direct acquisition sees a full bucket minus one
-        StoreResult parent = store.tryAcquire("p:global:g", parentLimit, Algorithm.TOKEN_BUCKET, 1);
+        StoreResult parent = store.tryAcquire(key("p:global:g"), parentLimit, Algorithm.TOKEN_BUCKET, 1);
         assertTrue(parent.acquired());
         assertEquals(9, parent.remaining());
     }
@@ -80,7 +83,7 @@ class LocalRateLimitStoreBatchTest {
     void childRejectionRollsBackParentExactlyForGcra() {
         Limit parentLimit = new Limit(10, 1, Duration.ofMillis(1));
         for (int i = 0; i < 5; i++) {
-            assertTrue(store.tryAcquire("c:tenant:t", LIMIT, Algorithm.GCRA, 1).acquired());
+            assertTrue(store.tryAcquire(key("c:tenant:t"), LIMIT, Algorithm.GCRA, 1).acquired());
         }
         ChainResult result = join(store, List.of(
                 level("p:global:g", parentLimit, Algorithm.GCRA, 3),
@@ -88,7 +91,7 @@ class LocalRateLimitStoreBatchTest {
         assertFalse(result.acquired());
         assertEquals(1, result.firedLevelIndex());
         // the GCRA parent keeps its full burst after the rollback
-        StoreResult parent = store.tryAcquire("p:global:g", parentLimit, Algorithm.GCRA, 10);
+        StoreResult parent = store.tryAcquire(key("p:global:g"), parentLimit, Algorithm.GCRA, 10);
         assertTrue(parent.acquired());
         assertEquals(0, parent.remaining());
     }
@@ -168,7 +171,7 @@ class LocalRateLimitStoreBatchTest {
     @Test
     void snapshotIsEmptyWhileBucketsAreFull() {
         assertTrue(store.snapshot().isEmpty());
-        store.tryAcquire("k", new Limit(5, 5, Duration.ofMillis(1)), Algorithm.TOKEN_BUCKET, 1);
+        store.tryAcquire(key("k"), new Limit(5, 5, Duration.ofMillis(1)), Algorithm.TOKEN_BUCKET, 1);
         // capacity 5 refills 5 per millisecond: not yet full right after one deduction
         assertEquals(1, store.snapshot().size());
         nanos.addAndGet(MILLI);
@@ -178,11 +181,11 @@ class LocalRateLimitStoreBatchTest {
 
     @Test
     void snapshotReportsActiveTokenBucketsWithRemaining() {
-        store.tryAcquire("k", LIMIT, Algorithm.TOKEN_BUCKET, 3);
+        store.tryAcquire(key("k"), LIMIT, Algorithm.TOKEN_BUCKET, 3);
         List<BucketState> snapshot = store.snapshot();
         assertEquals(1, snapshot.size());
         BucketState bucket = snapshot.get(0);
-        assertEquals("k", bucket.storageKey());
+        assertEquals(key("k"), bucket.storageKey());
         assertEquals(LIMIT, bucket.limit());
         assertEquals(Algorithm.TOKEN_BUCKET, bucket.algorithm());
         assertEquals(2, bucket.remaining());
@@ -190,7 +193,7 @@ class LocalRateLimitStoreBatchTest {
 
     @Test
     void snapshotReportsActiveGcraCellsAndSweepsDrainedOnes() {
-        store.tryAcquire("k", LIMIT, Algorithm.GCRA, 3);
+        store.tryAcquire(key("k"), LIMIT, Algorithm.GCRA, 3);
         List<BucketState> snapshot = store.snapshot();
         assertEquals(1, snapshot.size());
         BucketState bucket = snapshot.get(0);
@@ -203,7 +206,7 @@ class LocalRateLimitStoreBatchTest {
 
     @Test
     void snapshotReflectsRefillPartially() {
-        store.tryAcquire("k", LIMIT, Algorithm.TOKEN_BUCKET, 5);
+        store.tryAcquire(key("k"), LIMIT, Algorithm.TOKEN_BUCKET, 5);
         nanos.addAndGet(2 * MILLI);
         List<BucketState> snapshot = store.snapshot();
         assertEquals(1, snapshot.size());
@@ -211,26 +214,13 @@ class LocalRateLimitStoreBatchTest {
     }
 
     @Test
-    void rollbackToleratesCellsReplacedByAnotherAlgorithm() {
-        // pathological chain: the same key with both algorithms; the second
-        // level replaces the cell, so the first level's rollback finds a cell
-        // of the other kind and must leave it alone
-        Limit one = new Limit(1, 1, Duration.ofHours(1));
-        store.tryAcquire("c:tenant:t", one, Algorithm.TOKEN_BUCKET, 1); // drain the third level
-        ChainResult result = join(store, List.of(
-                level("k:p:x", LIMIT, Algorithm.TOKEN_BUCKET, 1),
-                level("k:p:x", LIMIT, Algorithm.GCRA, 1),
-                level("c:tenant:t", one, Algorithm.TOKEN_BUCKET, 1)));
-        assertFalse(result.acquired());
-        assertEquals(2, result.firedLevelIndex());
-
-        store.tryAcquire("c:tenant:t", one, Algorithm.GCRA, 1); // drain again, other order
-        ChainResult reversed = join(store, List.of(
-                level("k:p:y", LIMIT, Algorithm.GCRA, 1),
-                level("k:p:y", LIMIT, Algorithm.TOKEN_BUCKET, 1),
-                level("c:tenant:t", one, Algorithm.GCRA, 1)));
-        assertFalse(reversed.acquired());
-        assertEquals(2, reversed.firedLevelIndex());
+    void duplicateCanonicalBucketsAreRejectedBeforeAnyDebit() {
+        for (Algorithm first : Algorithm.values()) {
+            var duplicate = List.of(level("k:p:x", LIMIT, first, 1),
+                    level("k:p:x", LIMIT, Algorithm.GCRA, 1));
+            assertThrows(IllegalArgumentException.class, () -> join(store, duplicate));
+            assertTrue(store.snapshot().isEmpty());
+        }
     }
 
     @Test
@@ -238,10 +228,10 @@ class LocalRateLimitStoreBatchTest {
         assertThrows(NullPointerException.class,
                 () -> new BucketState(null, LIMIT, Algorithm.GCRA, 0));
         assertThrows(NullPointerException.class,
-                () -> new BucketState("k", null, Algorithm.GCRA, 0));
+                () -> new BucketState(key("k"), null, Algorithm.GCRA, 0));
         assertThrows(NullPointerException.class,
-                () -> new BucketState("k", LIMIT, null, 0));
+                () -> new BucketState(key("k"), LIMIT, null, 0));
         assertThrows(IllegalArgumentException.class,
-                () -> new BucketState("k", LIMIT, Algorithm.GCRA, -1));
+                () -> new BucketState(key("k"), LIMIT, Algorithm.GCRA, -1));
     }
 }

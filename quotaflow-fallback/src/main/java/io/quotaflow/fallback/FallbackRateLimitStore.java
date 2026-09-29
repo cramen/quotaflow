@@ -4,6 +4,10 @@ import io.quotaflow.core.Algorithm;
 import io.quotaflow.core.Limit;
 import io.quotaflow.core.Verdict;
 import io.quotaflow.core.store.BatchRateLimitStore;
+import io.quotaflow.core.store.BucketIdentity;
+import io.quotaflow.core.store.QuotaDomain;
+import io.quotaflow.core.store.PolicyBinding;
+import io.quotaflow.core.PolicyConfigurationException;
 import io.quotaflow.core.store.BucketState;
 import io.quotaflow.core.store.ChainResult;
 import io.quotaflow.core.store.LevelRequest;
@@ -30,14 +34,13 @@ import org.slf4j.LoggerFactory;
 /**
  * A {@link BatchRateLimitStore} that delegates to a primary (distributed)
  * store while it is healthy and degrades to a conservative local limiter when
- * the primary fails or stalls. No store exception escapes to the caller: a
- * failed primary call trips an embedded circuit breaker and the request is
- * decided locally instead.
+ * the primary fails or stalls. Availability failures on validated policies
+ * trigger local decisions. Identity/configuration failures propagate and
+ * never authorize an unverified local identity.
  *
  * <p>Degraded mode divides every level's limit by the configured
  * {@code expectedInstances} (token bucket: capacity and refill divided with a
- * floor of 1; GCRA: emission interval multiplied), so the summed degraded flow
- * across all instances stays within the global limit. Degraded chains are
+ * floor of 1; GCRA: emission interval multiplied). Degraded chains are
  * evaluated through the local batch path, so fired level, remaining and
  * retry-after read exactly like healthy-mode decisions. The requested weight
  * is a property of the request and passes through unscaled.
@@ -57,23 +60,22 @@ public final class FallbackRateLimitStore implements BatchRateLimitStore {
 
     private static final Logger log = LoggerFactory.getLogger(FallbackRateLimitStore.class);
 
-    private static final String UNKNOWN_GROUP = "unknown";
-
     private final BatchRateLimitStore primary;
     private final LocalRateLimitStore local;
     private final StateSeeder seeder;
     private final FallbackConfig config;
     private final List<DegradationListener> listeners;
-    private final Function<String, String> keyGroupExtractor;
+    private final Function<BucketIdentity, String> keyGroupExtractor;
     private final CircuitBreaker breaker;
+    private final java.util.Set<PolicyBinding> registeredBindings = ConcurrentHashMap.newKeySet();
 
     /**
-     * Chains served locally during the current outage: leaf storage key to the
+     * Domains served locally during the current outage: canonical domain to the
      * original (unscaled) level requests, so recovery seeding can address the
      * same distributed state and translate scaled remaining tokens back to
      * full-limit scale.
      */
-    private final ConcurrentHashMap<String, Map<String, LevelRequest>> trackedChains =
+    private final ConcurrentHashMap<QuotaDomain, Map<BucketIdentity, LevelRequest>> trackedDomains =
             new ConcurrentHashMap<>();
     private final AtomicInteger trackedEntries = new AtomicInteger();
     private final AtomicBoolean trackingCapLogged = new AtomicBoolean();
@@ -106,7 +108,7 @@ public final class FallbackRateLimitStore implements BatchRateLimitStore {
             FallbackConfig config,
             List<DegradationListener> listeners,
             LongSupplier nanoClock,
-            Function<String, String> keyGroupExtractor) {
+            Function<BucketIdentity, String> keyGroupExtractor) {
         this.primary = Objects.requireNonNull(primary, "primary");
         this.local = Objects.requireNonNull(local, "local");
         this.seeder = Objects.requireNonNull(seeder, "seeder");
@@ -121,19 +123,51 @@ public final class FallbackRateLimitStore implements BatchRateLimitStore {
         }
     }
 
+    @Override
+    public CompletionStage<Void> registerPolicies(List<PolicyBinding> bindings) {
+        List<PolicyBinding> candidate = List.copyOf(bindings);
+        // Control-plane failure must reject publication, never authorize an
+        // unverified identity merely because a local store can accept it.
+        return primary.registerPolicies(candidate).thenCompose(ignored -> local.registerPolicies(candidate))
+                .thenRun(() -> registeredBindings.addAll(candidate));
+    }
+
+    private boolean registered(List<PolicyBinding> bindings) {
+        return registeredBindings.containsAll(bindings);
+    }
+
+    private CompletionStage<Void> activate(List<PolicyBinding> bindings) {
+        try {
+            return registerPolicies(bindings).handle((ignored, error) -> {
+                if (error != null) {
+                    if (isCallerError(error)) throw new CompletionException(unwrap(error));
+                    throw new PolicyConfigurationException(
+                            "policy identity could not be validated; register policies before acquisition");
+                }
+                return null;
+            });
+        } catch (RuntimeException error) {
+            if (isCallerError(error)) throw error;
+            throw new PolicyConfigurationException(
+                    "policy identity could not be validated; register policies before acquisition");
+        }
+    }
+
     /** Current degradation state; visible for tests and inspection. */
     public DegradationState state() {
         return breaker.state();
     }
 
     @Override
-    public StoreResult tryAcquire(String storageKey, Limit limit, Algorithm algorithm, long weight) {
+    public StoreResult tryAcquire(BucketIdentity storageKey, Limit limit, Algorithm algorithm, long weight) {
         Objects.requireNonNull(storageKey, "storageKey");
         Objects.requireNonNull(limit, "limit");
         Objects.requireNonNull(algorithm, "algorithm");
         if (weight < 1) {
             throw new IllegalArgumentException("weight must be >= 1, got " + weight);
         }
+        List<PolicyBinding> binding = List.of(PolicyBinding.of(storageKey));
+        if (!registered(binding)) activate(binding).toCompletableFuture().join();
         CircuitBreaker.Call call = breaker.permitCall();
         if (call == CircuitBreaker.Call.LOCAL) {
             return serveLocally(storageKey, limit, algorithm, weight);
@@ -153,13 +187,16 @@ public final class FallbackRateLimitStore implements BatchRateLimitStore {
 
     @Override
     public CompletionStage<StoreResult> tryAcquireAsync(
-            String storageKey, Limit limit, Algorithm algorithm, long weight) {
+            BucketIdentity storageKey, Limit limit, Algorithm algorithm, long weight) {
         Objects.requireNonNull(storageKey, "storageKey");
         Objects.requireNonNull(limit, "limit");
         Objects.requireNonNull(algorithm, "algorithm");
         if (weight < 1) {
             throw new IllegalArgumentException("weight must be >= 1, got " + weight);
         }
+        List<PolicyBinding> binding = List.of(PolicyBinding.of(storageKey));
+        if (!registered(binding)) return activate(binding)
+                .thenCompose(ignored -> tryAcquireAsync(storageKey, limit, algorithm, weight));
         CircuitBreaker.Call call = breaker.permitCall();
         if (call == CircuitBreaker.Call.LOCAL) {
             return CompletableFuture.completedFuture(serveLocally(storageKey, limit, algorithm, weight));
@@ -190,10 +227,9 @@ public final class FallbackRateLimitStore implements BatchRateLimitStore {
 
     @Override
     public CompletionStage<ChainResult> tryAcquireAll(List<LevelRequest> chain) {
-        Objects.requireNonNull(chain, "chain");
-        if (chain.isEmpty()) {
-            throw new IllegalArgumentException("chain must not be empty");
-        }
+        LevelRequest.validateChain(chain);
+        List<PolicyBinding> bindings = chain.stream().map(level -> PolicyBinding.of(level.storageKey())).toList();
+        if (!registered(bindings)) return activate(bindings).thenCompose(ignored -> tryAcquireAll(chain));
         CircuitBreaker.Call call = breaker.permitCall();
         if (call == CircuitBreaker.Call.LOCAL) {
             return CompletableFuture.completedFuture(serveLocally(chain));
@@ -246,17 +282,17 @@ public final class FallbackRateLimitStore implements BatchRateLimitStore {
      */
     private void initiateRecovery() {
         List<BucketState> active = local.snapshot();
-        Map<String, List<BucketState>> byChain = groupByChain(active);
-        int total = byChain.values().stream().mapToInt(List::size).sum();
+        Map<QuotaDomain, List<BucketState>> byDomain = groupByDomain(active);
+        int total = byDomain.values().stream().mapToInt(List::size).sum();
         int overflow = total - config.maxSeedEntries();
         if (overflow > 0) {
             log.warn(
                     "seeding is capped at {} entries; skipping {} of {} active buckets",
                     config.maxSeedEntries(), overflow, total);
         }
-        List<CompletionStage<Void>> flushes = new ArrayList<>(byChain.size());
+        List<CompletionStage<Void>> flushes = new ArrayList<>(byDomain.size());
         int budget = config.maxSeedEntries();
-        for (Map.Entry<String, List<BucketState>> chain : byChain.entrySet()) {
+        for (Map.Entry<QuotaDomain, List<BucketState>> chain : byDomain.entrySet()) {
             List<BucketState> buckets = chain.getValue();
             if (buckets.size() > budget) {
                 buckets = buckets.subList(0, budget);
@@ -271,7 +307,7 @@ public final class FallbackRateLimitStore implements BatchRateLimitStore {
                         .toArray(CompletableFuture[]::new))
                 .whenComplete((ignored, error) -> {
                     if (error == null) {
-                        trackedChains.clear();
+                        trackedDomains.clear();
                         trackedEntries.set(0);
                         trackingCapLogged.set(false);
                         breaker.onSeedingSuccess(
@@ -284,7 +320,7 @@ public final class FallbackRateLimitStore implements BatchRateLimitStore {
     }
 
     /**
-     * Groups active buckets by the chain they were served under and translates
+     * Groups active buckets by canonical domain and translates
      * them back to full-limit scale: the local cells hold limits divided by
      * {@code expectedInstances}, so the remaining measured locally is
      * multiplied back (one instance's remaining of r out of capacity/N means
@@ -293,28 +329,28 @@ public final class FallbackRateLimitStore implements BatchRateLimitStore {
      * cell carries, which under-estimates remaining — the conservative
      * direction.
      */
-    private Map<String, List<BucketState>> groupByChain(List<BucketState> active) {
-        Map<String, BucketState> byKey = new LinkedHashMap<>();
+    private Map<QuotaDomain, List<BucketState>> groupByDomain(List<BucketState> active) {
+        Map<BucketIdentity, BucketState> byKey = new LinkedHashMap<>();
         for (BucketState bucket : active) {
             byKey.put(bucket.storageKey(), bucket);
         }
-        Map<String, List<BucketState>> byChain = new LinkedHashMap<>();
-        for (Map.Entry<String, Map<String, LevelRequest>> chain : trackedChains.entrySet()) {
+        Map<QuotaDomain, List<BucketState>> byDomain = new LinkedHashMap<>();
+        for (Map.Entry<QuotaDomain, Map<BucketIdentity, LevelRequest>> chain : trackedDomains.entrySet()) {
             List<BucketState> buckets = new ArrayList<>(chain.getValue().size());
-            for (Map.Entry<String, LevelRequest> level : chain.getValue().entrySet()) {
+            for (Map.Entry<BucketIdentity, LevelRequest> level : chain.getValue().entrySet()) {
                 BucketState bucket = byKey.remove(level.getKey());
                 if (bucket != null) {
                     buckets.add(toFullScale(bucket, level.getValue()));
                 }
             }
             if (!buckets.isEmpty()) {
-                byChain.put(chain.getKey(), buckets);
+                byDomain.put(chain.getKey(), buckets);
             }
         }
         for (BucketState untracked : byKey.values()) {
-            byChain.put(untracked.storageKey(), List.of(untracked));
+            byDomain.computeIfAbsent(untracked.storageKey().domain(), ignored -> new ArrayList<>()).add(untracked);
         }
-        return byChain;
+        return byDomain;
     }
 
     private BucketState toFullScale(BucketState localBucket, LevelRequest original) {
@@ -341,10 +377,10 @@ public final class FallbackRateLimitStore implements BatchRateLimitStore {
         return result;
     }
 
-    private StoreResult serveLocally(String storageKey, Limit limit, Algorithm algorithm, long weight) {
+    private StoreResult serveLocally(BucketIdentity storageKey, Limit limit, Algorithm algorithm, long weight) {
         if (trackedEntries.get() < config.maxSeedEntries()
-                && trackedChains
-                        .computeIfAbsent(storageKey, key -> new ConcurrentHashMap<>())
+                && trackedDomains
+                        .computeIfAbsent(storageKey.domain(), key -> new ConcurrentHashMap<>())
                         .putIfAbsent(storageKey, new LevelRequest(storageKey, limit, algorithm, weight))
                         == null) {
             trackedEntries.incrementAndGet();
@@ -355,8 +391,8 @@ public final class FallbackRateLimitStore implements BatchRateLimitStore {
     }
 
     /**
-     * Remembers the chain layout of a locally served request so recovery
-     * seeding can address the same state. Tracking is capped at
+     * Remembers canonical domain members of a local request so recovery
+     * seeding addresses the same state without duplicating shared parents. Tracking is capped at
      * {@code maxSeedEntries} level entries; beyond the cap new chains are
      * still served but no longer tracked (logged once per outage).
      */
@@ -368,9 +404,9 @@ public final class FallbackRateLimitStore implements BatchRateLimitStore {
             }
             return;
         }
-        String leaf = chain.get(chain.size() - 1).storageKey();
-        Map<String, LevelRequest> members =
-                trackedChains.computeIfAbsent(leaf, key -> new ConcurrentHashMap<>());
+        QuotaDomain domain = chain.get(0).storageKey().domain();
+        Map<BucketIdentity, LevelRequest> members =
+                trackedDomains.computeIfAbsent(domain, key -> new ConcurrentHashMap<>());
         for (LevelRequest level : chain) {
             if (members.putIfAbsent(level.storageKey(), level) == null) {
                 trackedEntries.incrementAndGet();
@@ -410,7 +446,7 @@ public final class FallbackRateLimitStore implements BatchRateLimitStore {
         }
     }
 
-    private void notifyFallbackDecision(String storageKey, boolean acquired) {
+    private void notifyFallbackDecision(BucketIdentity storageKey, boolean acquired) {
         if (listeners.isEmpty()) {
             return;
         }
@@ -427,28 +463,28 @@ public final class FallbackRateLimitStore implements BatchRateLimitStore {
         }
     }
 
-    private static String policyIdOf(String storageKey) {
-        int first = storageKey.indexOf(':');
-        return first < 0 ? UNKNOWN_GROUP : storageKey.substring(0, first);
+    private static String policyIdOf(BucketIdentity storageKey) {
+        return storageKey.policyId();
     }
 
-    /** Default key-group identity: the scope segment of {@code <policyId>:<scope>:<rawKey>}. */
-    private static String defaultKeyGroup(String storageKey) {
-        int first = storageKey.indexOf(':');
-        int second = first < 0 ? -1 : storageKey.indexOf(':', first + 1);
-        return second < 0 ? UNKNOWN_GROUP : storageKey.substring(first + 1, second);
+    /** Default telemetry grouping uses scope, never the raw identity. */
+    private static String defaultKeyGroup(BucketIdentity storageKey) {
+        return storageKey.scope().wireName();
     }
 
     /** Caller bugs (invalid input) propagate; only infrastructure failures degrade. */
     private static boolean isCallerError(Throwable error) {
-        return error instanceof IllegalArgumentException || error instanceof NullPointerException;
+        Throwable cause = unwrap(error);
+        return cause instanceof IllegalArgumentException || cause instanceof NullPointerException;
     }
 
     private static Throwable unwrap(Throwable error) {
-        if ((error instanceof CompletionException || error instanceof ExecutionException)
-                && error.getCause() != null) {
-            return error.getCause();
+        Throwable cause = error;
+        java.util.Set<Throwable> seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        while ((cause instanceof CompletionException || cause instanceof ExecutionException)
+                && cause.getCause() != null && seen.add(cause)) {
+            cause = cause.getCause();
         }
-        return error;
+        return cause;
     }
 }

@@ -1,5 +1,8 @@
 package io.quotaflow.store.redis;
 
+import static io.quotaflow.testing.TestIdentities.key;
+import io.quotaflow.core.store.BucketIdentity;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -30,7 +33,7 @@ class SeedScriptTest extends RedisContainerSupport {
     private static final Limit LIMIT = new Limit(10, 1, Duration.ofHours(1));
 
     private static BucketState bucket(String key, Algorithm algorithm, long remaining) {
-        return new BucketState(key, LIMIT, algorithm, remaining);
+        return new BucketState(key(key), LIMIT, algorithm, remaining);
     }
 
     @Test
@@ -38,8 +41,8 @@ class SeedScriptTest extends RedisContainerSupport {
         try (StatefulRedisConnection<String, String> connection = client().connect();
                 RedisRateLimitStore store = newStore(connection)) {
             String key = storageKey("seed", "tenant", "absent-tb");
-            store.seed(key, List.of(bucket(key, Algorithm.TOKEN_BUCKET, 3))).toCompletableFuture().join();
-            StoreResult result = store.tryAcquire(key, LIMIT, Algorithm.TOKEN_BUCKET, 1);
+            store.seed(key(key).domain(), List.of(bucket(key, Algorithm.TOKEN_BUCKET, 3))).toCompletableFuture().join();
+            StoreResult result = store.tryAcquire(key(key), LIMIT, Algorithm.TOKEN_BUCKET, 1);
             assertTrue(result.acquired());
             assertEquals(2, result.remaining(), "seeded with 3 of 10 remaining, one more acquired");
         }
@@ -51,15 +54,15 @@ class SeedScriptTest extends RedisContainerSupport {
                 RedisRateLimitStore store = newStore(connection)) {
             String key = storageKey("seed", "tenant", "merge-tb");
             for (int i = 0; i < 4; i++) {
-                assertTrue(store.tryAcquire(key, LIMIT, Algorithm.TOKEN_BUCKET, 1).acquired());
+                assertTrue(store.tryAcquire(key(key), LIMIT, Algorithm.TOKEN_BUCKET, 1).acquired());
             }
             // store holds 6; a local snapshot claiming 8 must not raise it
-            store.seed(key, List.of(bucket(key, Algorithm.TOKEN_BUCKET, 8))).toCompletableFuture().join();
-            StoreResult result = store.tryAcquire(key, LIMIT, Algorithm.TOKEN_BUCKET, 1);
+            store.seed(key(key).domain(), List.of(bucket(key, Algorithm.TOKEN_BUCKET, 8))).toCompletableFuture().join();
+            StoreResult result = store.tryAcquire(key(key), LIMIT, Algorithm.TOKEN_BUCKET, 1);
             assertEquals(5, result.remaining(), "the lower stored remaining won the merge");
             // a local snapshot claiming less does lower it
-            store.seed(key, List.of(bucket(key, Algorithm.TOKEN_BUCKET, 2))).toCompletableFuture().join();
-            StoreResult lowered = store.tryAcquire(key, LIMIT, Algorithm.TOKEN_BUCKET, 1);
+            store.seed(key(key).domain(), List.of(bucket(key, Algorithm.TOKEN_BUCKET, 2))).toCompletableFuture().join();
+            StoreResult lowered = store.tryAcquire(key(key), LIMIT, Algorithm.TOKEN_BUCKET, 1);
             assertEquals(1, lowered.remaining(), "the lower local remaining won the merge");
         }
     }
@@ -69,21 +72,21 @@ class SeedScriptTest extends RedisContainerSupport {
         try (StatefulRedisConnection<String, String> connection = client().connect();
                 RedisRateLimitStore store = newStore(connection)) {
             String fresh = storageKey("seed", "tenant", "absent-gcra");
-            store.seed(fresh, List.of(bucket(fresh, Algorithm.GCRA, 3))).toCompletableFuture().join();
-            StoreResult adopted = store.tryAcquire(fresh, LIMIT, Algorithm.GCRA, 1);
+            store.seed(key(fresh).domain(), List.of(bucket(fresh, Algorithm.GCRA, 3))).toCompletableFuture().join();
+            StoreResult adopted = store.tryAcquire(key(fresh), LIMIT, Algorithm.GCRA, 1);
             assertTrue(adopted.acquired());
             assertEquals(2, adopted.remaining());
 
             String merged = storageKey("seed", "tenant", "merge-gcra");
             for (int i = 0; i < 4; i++) {
-                assertTrue(store.tryAcquire(merged, LIMIT, Algorithm.GCRA, 1).acquired());
+                assertTrue(store.tryAcquire(key(merged), LIMIT, Algorithm.GCRA, 1).acquired());
             }
             // store holds 6; local claims 8 -> stays 6
-            store.seed(merged, List.of(bucket(merged, Algorithm.GCRA, 8))).toCompletableFuture().join();
-            assertEquals(5, store.tryAcquire(merged, LIMIT, Algorithm.GCRA, 1).remaining());
+            store.seed(key(merged).domain(), List.of(bucket(merged, Algorithm.GCRA, 8))).toCompletableFuture().join();
+            assertEquals(5, store.tryAcquire(key(merged), LIMIT, Algorithm.GCRA, 1).remaining());
             // local claims 1 -> drops to 1
-            store.seed(merged, List.of(bucket(merged, Algorithm.GCRA, 1))).toCompletableFuture().join();
-            assertEquals(0, store.tryAcquire(merged, LIMIT, Algorithm.GCRA, 1).remaining());
+            store.seed(key(merged).domain(), List.of(bucket(merged, Algorithm.GCRA, 1))).toCompletableFuture().join();
+            assertEquals(0, store.tryAcquire(key(merged), LIMIT, Algorithm.GCRA, 1).remaining());
         }
     }
 
@@ -94,10 +97,10 @@ class SeedScriptTest extends RedisContainerSupport {
             String parentKey = storageKey("seedg", "global", "g");
             String leafKey = storageKey("seedu", "user", "u");
             List<LevelRequest> chain = List.of(
-                    new LevelRequest(parentKey, LIMIT, Algorithm.TOKEN_BUCKET, 1),
-                    new LevelRequest(leafKey, LIMIT, Algorithm.TOKEN_BUCKET, 1));
+                    new LevelRequest(key(parentKey), LIMIT, Algorithm.TOKEN_BUCKET, 1),
+                    new LevelRequest(key(leafKey), LIMIT, Algorithm.TOKEN_BUCKET, 1));
             // seed the parent as fully consumed under this chain's leaf identity
-            store.seed(leafKey, List.of(bucket(parentKey, Algorithm.TOKEN_BUCKET, 0)))
+            store.seed(key(leafKey).domain(), List.of(bucket(parentKey, Algorithm.TOKEN_BUCKET, 0)))
                     .toCompletableFuture().join();
             ChainResult rejected = store.tryAcquireAll(chain).toCompletableFuture().join();
             assertFalse(rejected.acquired());
@@ -112,12 +115,12 @@ class SeedScriptTest extends RedisContainerSupport {
                 RedisRateLimitStore store = newStore(connection)) {
             String leafKey = storageKey("seedu", "user", "multi");
             String parentKey = storageKey("seedt", "tenant", "multi");
-            store.seed(leafKey, List.of(
+            store.seed(key(leafKey).domain(), List.of(
                     bucket(parentKey, Algorithm.TOKEN_BUCKET, 7),
                     bucket(leafKey, Algorithm.TOKEN_BUCKET, 4))).toCompletableFuture().join();
             ChainResult result = store.tryAcquireAll(List.of(
-                    new LevelRequest(parentKey, LIMIT, Algorithm.TOKEN_BUCKET, 1),
-                    new LevelRequest(leafKey, LIMIT, Algorithm.TOKEN_BUCKET, 1)))
+                    new LevelRequest(key(parentKey), LIMIT, Algorithm.TOKEN_BUCKET, 1),
+                    new LevelRequest(key(leafKey), LIMIT, Algorithm.TOKEN_BUCKET, 1)))
                     .toCompletableFuture().join();
             assertTrue(result.acquired());
             assertEquals(3, result.remaining(), "min(7-1, 4-1)");
@@ -128,7 +131,7 @@ class SeedScriptTest extends RedisContainerSupport {
     void emptySeedCompletesWithoutStoreCalls() {
         try (StatefulRedisConnection<String, String> connection = client().connect();
                 RedisRateLimitStore store = newStore(connection)) {
-            store.seed("any:global:g", List.of()).toCompletableFuture().join();
+            store.seed(key("any:global:g").domain(), List.of()).toCompletableFuture().join();
         }
     }
 
@@ -139,7 +142,7 @@ class SeedScriptTest extends RedisContainerSupport {
         connection.close();
         String key = storageKey("seed", "tenant", "closed");
         CompletionStage<Void> seeding =
-                store.seed(key, List.of(bucket(key, Algorithm.TOKEN_BUCKET, 1)));
+                store.seed(key(key).domain(), List.of(bucket(key, Algorithm.TOKEN_BUCKET, 1)));
         assertThrows(CompletionException.class,
                 () -> seeding.toCompletableFuture().join());
     }

@@ -1,5 +1,8 @@
 package io.quotaflow.tck;
 
+import static io.quotaflow.testing.TestIdentities.key;
+import io.quotaflow.core.store.BucketIdentity;
+
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -119,7 +122,7 @@ class BoundaryBurstTckTest extends TckContainers {
     private static long burst(RedisRateLimitStore store, String key, Algorithm algorithm, int attempts) {
         long allowed = 0;
         for (int i = 0; i < attempts; i++) {
-            if (store.tryAcquire(key, LIMIT, algorithm, 1).acquired()) {
+            if (store.tryAcquire(key(key), LIMIT, algorithm, 1).acquired()) {
                 allowed++;
             }
         }

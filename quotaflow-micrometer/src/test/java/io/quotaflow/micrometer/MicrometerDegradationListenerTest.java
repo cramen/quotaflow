@@ -1,5 +1,8 @@
 package io.quotaflow.micrometer;
 
+import static io.quotaflow.testing.TestIdentities.key;
+import io.quotaflow.core.store.BucketIdentity;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -28,6 +31,16 @@ class MicrometerDegradationListenerTest {
 
     /** Primary store whose health the test flips to simulate an outage. */
     private static final class ControllablePrimary implements BatchRateLimitStore {
+        private final io.quotaflow.core.store.LocalPolicyBindings policyBindings =
+                new io.quotaflow.core.store.LocalPolicyBindings();
+
+        @Override
+        public java.util.concurrent.CompletionStage<Void> registerPolicies(
+                java.util.List<io.quotaflow.core.store.PolicyBinding> bindings) {
+            policyBindings.register(bindings);
+            return java.util.concurrent.CompletableFuture.completedFuture(null);
+        }
+
         private volatile boolean healthy = true;
 
         void fail() {
@@ -39,7 +52,7 @@ class MicrometerDegradationListenerTest {
         }
 
         @Override
-        public StoreResult tryAcquire(String storageKey, Limit limit, Algorithm algorithm, long weight) {
+        public StoreResult tryAcquire(BucketIdentity storageKey, Limit limit, Algorithm algorithm, long weight) {
             if (!healthy) {
                 throw new RuntimeException("primary store unavailable");
             }
@@ -48,7 +61,7 @@ class MicrometerDegradationListenerTest {
 
         @Override
         public CompletionStage<StoreResult> tryAcquireAsync(
-                String storageKey, Limit limit, Algorithm algorithm, long weight) {
+                BucketIdentity storageKey, Limit limit, Algorithm algorithm, long weight) {
             return CompletableFuture.completedFuture(tryAcquire(storageKey, limit, algorithm, weight));
         }
 
@@ -81,25 +94,25 @@ class MicrometerDegradationListenerTest {
         assertEquals(0.0, degraded(registry));
 
         // healthy: served by the primary, no fallback decisions
-        store.tryAcquire(KEY, LIMIT, Algorithm.TOKEN_BUCKET, 1);
+        store.tryAcquire(key(KEY), LIMIT, Algorithm.TOKEN_BUCKET, 1);
         assertEquals(0.0, degraded(registry));
         assertEquals(0.0, fallbackDecisions(registry));
 
         // outage: the threshold of 1 trips the breaker on the first failure
         primary.fail();
-        store.tryAcquire(KEY, LIMIT, Algorithm.TOKEN_BUCKET, 1);
+        store.tryAcquire(key(KEY), LIMIT, Algorithm.TOKEN_BUCKET, 1);
         assertEquals(DegradationState.OPEN, store.state());
         assertEquals(1.0, degraded(registry));
         assertEquals(1.0, fallbackDecisions(registry));
 
-        store.tryAcquire(KEY, LIMIT, Algorithm.TOKEN_BUCKET, 1);
+        store.tryAcquire(key(KEY), LIMIT, Algorithm.TOKEN_BUCKET, 1);
         assertEquals(2.0, fallbackDecisions(registry));
 
         // recovery: after the open duration the next request probes the now
         // healthy primary, seeding succeeds and the breaker closes
         primary.heal();
         clock.addAndGet(Duration.ofMillis(150).toNanos());
-        store.tryAcquire(KEY, LIMIT, Algorithm.TOKEN_BUCKET, 1);
+        store.tryAcquire(key(KEY), LIMIT, Algorithm.TOKEN_BUCKET, 1);
         assertEquals(DegradationState.CLOSED, store.state());
         assertEquals(0.0, degraded(registry));
         assertEquals(2.0, fallbackDecisions(registry));

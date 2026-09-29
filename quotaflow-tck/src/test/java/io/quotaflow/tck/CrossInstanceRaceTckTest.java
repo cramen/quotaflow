@@ -1,5 +1,8 @@
 package io.quotaflow.tck;
 
+import static io.quotaflow.testing.TestIdentities.key;
+import io.quotaflow.core.store.BucketIdentity;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -72,7 +75,7 @@ class CrossInstanceRaceTckTest extends TckContainers {
                             return;
                         }
                         for (int attempt = 0; attempt < ATTEMPTS_PER_THREAD; attempt++) {
-                            if (store.tryAcquire(key, limit, Algorithm.TOKEN_BUCKET, 1).acquired()) {
+                            if (store.tryAcquire(key(key), limit, Algorithm.TOKEN_BUCKET, 1).acquired()) {
                                 allowed.incrementAndGet();
                             }
                         }

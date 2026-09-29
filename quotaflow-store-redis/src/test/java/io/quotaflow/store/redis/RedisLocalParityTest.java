@@ -1,5 +1,8 @@
 package io.quotaflow.store.redis;
 
+import static io.quotaflow.testing.TestIdentities.key;
+import io.quotaflow.core.store.BucketIdentity;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -90,7 +93,7 @@ class RedisLocalParityTest extends RedisContainerSupport {
         LuaScript script = LuaScript.load(
                 algorithm == Algorithm.TOKEN_BUCKET ? "/lua/token_bucket.lua" : "/lua/gcra.lua");
         String storageKey = storageKey("parity", algorithm.name().toLowerCase(), "key");
-        String redisKey = RedisKeyScheme.defaults().singleKey(storageKey);
+        String redisKey = RedisKeyScheme.defaults().singleKey(key(storageKey));
         String[] keys = {redisKey};
 
         AtomicLong oracleClock = new AtomicLong();
@@ -115,7 +118,7 @@ class RedisLocalParityTest extends RedisContainerSupport {
 
                     oracleClock.set(call.serverMicros() * 1_000);
                     StoreResult expected =
-                            oracle.tryAcquire(storageKey, LIMIT, algorithm, step.weight());
+                            oracle.tryAcquire(key(storageKey), LIMIT, algorithm, step.weight());
                     StoreResult actual = toResult(call.reply());
 
                     String context = "step " + i + " (gap " + step.gapMillis() + " ms, weight "

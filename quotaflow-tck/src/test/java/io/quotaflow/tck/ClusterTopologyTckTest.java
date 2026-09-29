@@ -1,8 +1,12 @@
 package io.quotaflow.tck;
 
+import static io.quotaflow.testing.TestIdentities.key;
+import io.quotaflow.core.store.BucketIdentity;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import io.lettuce.core.RedisClient;
@@ -77,6 +81,13 @@ class ClusterTopologyTckTest {
         clusterClient = RedisClusterClient.create(
                 RedisURI.create("127.0.0.1", FIRST_PORT));
         awaitTopologyUsable(Duration.ofSeconds(60));
+        try (var connection = clusterClient.connect()) {
+            new io.quotaflow.store.redis.RedisNamespaceAdmin(connection).provisionFresh("default", true);
+        }
+        RedisClient provisioning = RedisClient.create("redis://" + standalone.getHost() + ":" + standalone.getMappedPort(6379));
+        try (var connection = provisioning.connect()) {
+            new io.quotaflow.store.redis.RedisNamespaceAdmin(connection).provisionFresh("default", true);
+        } finally { provisioning.shutdown(); }
     }
 
     private static GenericContainer<?> startWithPortRetry(int attempts) {
@@ -193,19 +204,53 @@ class ClusterTopologyTckTest {
     private static List<LevelRequest> chain(String run) {
         String suffix = '-' + run;
         return List.of(
-                new LevelRequest("g:global:global" + suffix,
+                new LevelRequest(key("g:global:global" + suffix),
                         new Limit(2, 1, Duration.ofSeconds(10)), Algorithm.TOKEN_BUCKET, 1),
-                new LevelRequest("t:tenant:acme" + suffix,
+                new LevelRequest(key("t:tenant:acme" + suffix),
                         new Limit(5, 1, Duration.ofSeconds(10)), Algorithm.TOKEN_BUCKET, 1),
-                new LevelRequest("u:user:alice" + suffix,
+                new LevelRequest(key("u:user:alice" + suffix),
                         new Limit(3, 1, Duration.ofSeconds(10)), Algorithm.TOKEN_BUCKET, 1));
+    }
+
+    @Test
+    void sharedWeightedHierarchyAndDirectParentsOnCluster() throws Exception {
+        try (var connection = clusterClient.connect(); var store = new RedisRateLimitStore(connection,
+                new RedisStoreConfig(Duration.ofSeconds(2), Duration.ofSeconds(4)))) {
+            for (Algorithm algorithm : Algorithm.values()) HierarchyConformance.verify(store, algorithm);
+        }
+    }
+
+    @Test
+    void migrationAssessmentIncludesEveryPrimaryShard() throws Exception {
+        try (var connection = clusterClient.connect()) {
+            var admin = new io.quotaflow.store.redis.RedisNamespaceAdmin(connection);
+            var primaries = admin.primaryIds();
+            assertEquals(3, primaries.size());
+            var written = new java.util.HashSet<String>();
+            for (int i = 0; written.size() < primaries.size() && i < 1000; i++) {
+                String legacy = "{migration-" + i + "}:migration:global:g";
+                int slot = io.lettuce.core.cluster.SlotHash.getSlot(legacy);
+                String primary = connection.getPartitions().getPartitionBySlot(slot).getNodeId();
+                if (written.add(primary)) connection.sync().psetex(legacy, 5000, "0:1:0");
+            }
+            assertEquals(primaries, written);
+            var inventory = new io.quotaflow.store.redis.RedisNamespaceAdmin.LegacyInventory(
+                    java.util.Set.of("migration"), java.util.Set.of(), primaries, true, true, true);
+            var assessment = admin.assessMigration(inventory);
+            assertEquals(3, assessment.outstandingKeys());
+            assertThrows(io.quotaflow.core.PolicyConfigurationException.class,
+                    () -> admin.provisionMigrated("cluster-migration", 4096, inventory));
+            long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+            while (!admin.assessMigration(inventory).drained() && System.nanoTime() < deadline) Thread.sleep(50);
+            assertTrue(admin.provisionMigrated("cluster-migration", 4096, inventory).drained());
+        }
     }
 
     @Test
     void allChainKeysLandOnOneSlot() {
         try (StatefulRedisClusterConnection<String, String> connection = clusterClient.connect()) {
             List<LevelRequest> chain = chain(UUID.randomUUID().toString());
-            List<String> keys = new RedisKeyScheme(RedisKeyScheme.DEFAULT_MAX_RAW_KEY_BYTES)
+            List<String> keys = RedisKeyScheme.defaults()
                     .chainKeys(chain.stream().map(LevelRequest::storageKey).toList());
             List<Long> slots = keys.stream()
                     .map(key -> connection.sync().clusterKeyslot(key))
@@ -266,9 +311,9 @@ class ClusterTopologyTckTest {
             Limit limit = new Limit(1, 1, Duration.ofSeconds(10));
             for (Algorithm algorithm : Algorithm.values()) {
                 String key = "cluster:user:" + algorithm.name().toLowerCase() + '-' + UUID.randomUUID();
-                StoreResult allowed = store.tryAcquire(key, limit, algorithm, 1);
+                StoreResult allowed = store.tryAcquire(key(key), limit, algorithm, 1);
                 assertTrue(allowed.acquired(), algorithm + " first acquisition");
-                assertFalse(store.tryAcquire(key, limit, algorithm, 1).acquired(),
+                assertFalse(store.tryAcquire(key(key), limit, algorithm, 1).acquired(),
                         algorithm + " second acquisition must be rejected");
             }
         }

@@ -1,5 +1,8 @@
 package io.quotaflow.core;
 
+import static io.quotaflow.testing.TestIdentities.key;
+import io.quotaflow.core.store.BucketIdentity;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -28,6 +31,16 @@ class PolicyEngineDynamicLimitTest {
 
     /** Per-level store over a deterministic local store (no batch capability). */
     private static final class PerLevelStore implements RateLimitStore {
+        private final io.quotaflow.core.store.LocalPolicyBindings policyBindings =
+                new io.quotaflow.core.store.LocalPolicyBindings();
+
+        @Override
+        public java.util.concurrent.CompletionStage<Void> registerPolicies(
+                java.util.List<io.quotaflow.core.store.PolicyBinding> bindings) {
+            policyBindings.register(bindings);
+            return java.util.concurrent.CompletableFuture.completedFuture(null);
+        }
+
         private final LocalRateLimitStore delegate;
         private final AtomicInteger calls = new AtomicInteger();
 
@@ -36,14 +49,14 @@ class PolicyEngineDynamicLimitTest {
         }
 
         @Override
-        public StoreResult tryAcquire(String storageKey, Limit limit, Algorithm algorithm, long weight) {
+        public StoreResult tryAcquire(BucketIdentity storageKey, Limit limit, Algorithm algorithm, long weight) {
             calls.incrementAndGet();
-            return delegate.tryAcquire(storageKey, limit, algorithm, weight);
+            return delegate.tryAcquire(key(storageKey), limit, algorithm, weight);
         }
 
         @Override
         public CompletionStage<StoreResult> tryAcquireAsync(
-                String storageKey, Limit limit, Algorithm algorithm, long weight) {
+                BucketIdentity storageKey, Limit limit, Algorithm algorithm, long weight) {
             return CompletableFuture.completedFuture(tryAcquire(storageKey, limit, algorithm, weight));
         }
     }

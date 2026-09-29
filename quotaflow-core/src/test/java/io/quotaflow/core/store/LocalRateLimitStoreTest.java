@@ -1,5 +1,8 @@
 package io.quotaflow.core.store;
 
+import static io.quotaflow.testing.TestIdentities.key;
+import io.quotaflow.core.store.BucketIdentity;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -27,11 +30,11 @@ class LocalRateLimitStoreTest {
     @Test
     void tokenBucketAdmitsExactlyCapacityThenRejects() {
         for (long expectedRemaining = 4; expectedRemaining >= 0; expectedRemaining--) {
-            StoreResult result = store.tryAcquire("k", LIMIT, Algorithm.TOKEN_BUCKET, 1);
+            StoreResult result = store.tryAcquire(key("k"), LIMIT, Algorithm.TOKEN_BUCKET, 1);
             assertTrue(result.acquired());
             assertEquals(expectedRemaining, result.remaining());
         }
-        StoreResult rejected = store.tryAcquire("k", LIMIT, Algorithm.TOKEN_BUCKET, 1);
+        StoreResult rejected = store.tryAcquire(key("k"), LIMIT, Algorithm.TOKEN_BUCKET, 1);
         assertFalse(rejected.acquired());
         assertEquals(0, rejected.remaining());
         assertEquals(1, rejected.retryAfterMillis());
@@ -41,17 +44,17 @@ class LocalRateLimitStoreTest {
     void tokenBucketRefillsDeterministically() {
         drain("k", 5);
         nanos.addAndGet(3 * MILLI);
-        StoreResult result = store.tryAcquire("k", LIMIT, Algorithm.TOKEN_BUCKET, 3);
+        StoreResult result = store.tryAcquire(key("k"), LIMIT, Algorithm.TOKEN_BUCKET, 3);
         assertTrue(result.acquired());
         assertEquals(0, result.remaining());
-        assertFalse(store.tryAcquire("k", LIMIT, Algorithm.TOKEN_BUCKET, 1).acquired());
+        assertFalse(store.tryAcquire(key("k"), LIMIT, Algorithm.TOKEN_BUCKET, 1).acquired());
     }
 
     @Test
     void tokenBucketRefillIsCappedAtCapacity() {
         drain("k", 5);
         nanos.addAndGet(60_000 * MILLI);
-        StoreResult result = store.tryAcquire("k", LIMIT, Algorithm.TOKEN_BUCKET, 1);
+        StoreResult result = store.tryAcquire(key("k"), LIMIT, Algorithm.TOKEN_BUCKET, 1);
         assertTrue(result.acquired());
         assertEquals(4, result.remaining());
     }
@@ -59,9 +62,9 @@ class LocalRateLimitStoreTest {
     @Test
     void rejectionConsumesNoTokens() {
         drain("k", 5);
-        assertFalse(store.tryAcquire("k", LIMIT, Algorithm.TOKEN_BUCKET, 2).acquired());
+        assertFalse(store.tryAcquire(key("k"), LIMIT, Algorithm.TOKEN_BUCKET, 2).acquired());
         nanos.addAndGet(MILLI);
-        StoreResult result = store.tryAcquire("k", LIMIT, Algorithm.TOKEN_BUCKET, 1);
+        StoreResult result = store.tryAcquire(key("k"), LIMIT, Algorithm.TOKEN_BUCKET, 1);
         assertTrue(result.acquired());
         assertEquals(0, result.remaining());
     }
@@ -69,22 +72,22 @@ class LocalRateLimitStoreTest {
     @Test
     void retryAfterScalesWithMissingWeight() {
         drain("k", 5);
-        StoreResult rejected = store.tryAcquire("k", LIMIT, Algorithm.TOKEN_BUCKET, 3);
+        StoreResult rejected = store.tryAcquire(key("k"), LIMIT, Algorithm.TOKEN_BUCKET, 3);
         assertEquals(3, rejected.retryAfterMillis());
     }
 
     @Test
     void weightAboveCapacityIsNeverAdmitted() {
-        StoreResult rejected = store.tryAcquire("k", LIMIT, Algorithm.TOKEN_BUCKET, 6);
+        StoreResult rejected = store.tryAcquire(key("k"), LIMIT, Algorithm.TOKEN_BUCKET, 6);
         assertFalse(rejected.acquired());
         assertTrue(rejected.retryAfterMillis() > 0);
         nanos.addAndGet(60_000 * MILLI);
-        assertFalse(store.tryAcquire("k", LIMIT, Algorithm.TOKEN_BUCKET, 6).acquired());
+        assertFalse(store.tryAcquire(key("k"), LIMIT, Algorithm.TOKEN_BUCKET, 6).acquired());
     }
 
     @Test
     void weightedAcquisitionConsumesWeight() {
-        StoreResult result = store.tryAcquire("k", LIMIT, Algorithm.TOKEN_BUCKET, 4);
+        StoreResult result = store.tryAcquire(key("k"), LIMIT, Algorithm.TOKEN_BUCKET, 4);
         assertTrue(result.acquired());
         assertEquals(1, result.remaining());
     }
@@ -92,18 +95,18 @@ class LocalRateLimitStoreTest {
     @Test
     void bucketsAreIndependentPerKey() {
         drain("a", 5);
-        assertTrue(store.tryAcquire("b", LIMIT, Algorithm.TOKEN_BUCKET, 1).acquired());
+        assertTrue(store.tryAcquire(key("b"), LIMIT, Algorithm.TOKEN_BUCKET, 1).acquired());
         assertEquals(2, store.cellCount());
     }
 
     @Test
     void gcraAdmitsExactlyCapacityThenRejects() {
         for (long expectedRemaining = 4; expectedRemaining >= 0; expectedRemaining--) {
-            StoreResult result = store.tryAcquire("k", LIMIT, Algorithm.GCRA, 1);
+            StoreResult result = store.tryAcquire(key("k"), LIMIT, Algorithm.GCRA, 1);
             assertTrue(result.acquired());
             assertEquals(expectedRemaining, result.remaining());
         }
-        StoreResult rejected = store.tryAcquire("k", LIMIT, Algorithm.GCRA, 1);
+        StoreResult rejected = store.tryAcquire(key("k"), LIMIT, Algorithm.GCRA, 1);
         assertFalse(rejected.acquired());
         assertEquals(0, rejected.remaining());
         assertEquals(1, rejected.retryAfterMillis());
@@ -113,29 +116,29 @@ class LocalRateLimitStoreTest {
     void gcraRefillsDeterministically() {
         drain("k", 5, Algorithm.GCRA);
         nanos.addAndGet(3 * MILLI);
-        StoreResult result = store.tryAcquire("k", LIMIT, Algorithm.GCRA, 3);
+        StoreResult result = store.tryAcquire(key("k"), LIMIT, Algorithm.GCRA, 3);
         assertTrue(result.acquired());
         assertEquals(0, result.remaining());
     }
 
     @Test
     void gcraWeightAboveCapacityIsNeverAdmitted() {
-        assertFalse(store.tryAcquire("k", LIMIT, Algorithm.GCRA, 6).acquired());
+        assertFalse(store.tryAcquire(key("k"), LIMIT, Algorithm.GCRA, 6).acquired());
         nanos.addAndGet(60_000 * MILLI);
-        assertFalse(store.tryAcquire("k", LIMIT, Algorithm.GCRA, 6).acquired());
+        assertFalse(store.tryAcquire(key("k"), LIMIT, Algorithm.GCRA, 6).acquired());
     }
 
     @Test
     void algorithmsDoNotShareStateForSameKey() {
         drain("k", 5, Algorithm.TOKEN_BUCKET);
-        StoreResult result = store.tryAcquire("k", LIMIT, Algorithm.GCRA, 1);
+        StoreResult result = store.tryAcquire(key("k"), LIMIT, Algorithm.GCRA, 1);
         assertTrue(result.acquired());
         assertEquals(4, result.remaining());
     }
 
     @Test
     void asyncAcquisitionMatchesSync() {
-        StoreResult result = store.tryAcquireAsync("k", LIMIT, Algorithm.TOKEN_BUCKET, 2)
+        StoreResult result = store.tryAcquireAsync(key("k"), LIMIT, Algorithm.TOKEN_BUCKET, 2)
                 .toCompletableFuture().join();
         assertTrue(result.acquired());
         assertEquals(3, result.remaining());
@@ -144,13 +147,13 @@ class LocalRateLimitStoreTest {
     @Test
     void rejectsInvalidInput() {
         assertThrows(IllegalArgumentException.class,
-                () -> store.tryAcquire("k", LIMIT, Algorithm.TOKEN_BUCKET, 0));
+                () -> store.tryAcquire(key("k"), LIMIT, Algorithm.TOKEN_BUCKET, 0));
         assertThrows(NullPointerException.class,
                 () -> store.tryAcquire(null, LIMIT, Algorithm.TOKEN_BUCKET, 1));
         assertThrows(NullPointerException.class,
-                () -> store.tryAcquire("k", null, Algorithm.TOKEN_BUCKET, 1));
+                () -> store.tryAcquire(key("k"), null, Algorithm.TOKEN_BUCKET, 1));
         assertThrows(NullPointerException.class,
-                () -> store.tryAcquire("k", LIMIT, null, 1));
+                () -> store.tryAcquire(key("k"), LIMIT, null, 1));
     }
 
     @Test
@@ -168,7 +171,7 @@ class LocalRateLimitStoreTest {
 
     private void drain(String key, long tokens, Algorithm algorithm) {
         for (long i = 0; i < tokens; i++) {
-            assertTrue(store.tryAcquire(key, LIMIT, algorithm, 1).acquired());
+            assertTrue(store.tryAcquire(key(key), LIMIT, algorithm, 1).acquired());
         }
     }
 }

@@ -11,8 +11,12 @@ import io.lettuce.core.cluster.RedisClusterClient;
 import io.lettuce.core.cluster.api.StatefulRedisClusterConnection;
 import io.quotaflow.core.Algorithm;
 import io.quotaflow.core.Limit;
+import io.quotaflow.core.PolicyConfigurationException;
 import io.quotaflow.core.store.BatchRateLimitStore;
 import io.quotaflow.core.store.BucketState;
+import io.quotaflow.core.store.BucketIdentity;
+import io.quotaflow.core.store.QuotaDomain;
+import io.quotaflow.core.store.PolicyBinding;
 import io.quotaflow.core.store.ChainResult;
 import io.quotaflow.core.store.LevelRequest;
 import io.quotaflow.core.store.StateSeeder;
@@ -21,6 +25,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
@@ -55,6 +60,8 @@ public final class RedisRateLimitStore implements BatchRateLimitStore, StateSeed
     private final LuaScript gcraScript;
     private final LuaScript chainScript;
     private final LuaScript seedScript;
+    private final LuaScript registerScript;
+    private final java.util.Set<PolicyBinding> verifiedBindings = ConcurrentHashMap.newKeySet();
 
     /** Store over a caller-managed standalone connection; {@link #close()} does not close it. */
     public RedisRateLimitStore(StatefulRedisConnection<String, String> connection, RedisStoreConfig config) {
@@ -149,16 +156,63 @@ public final class RedisRateLimitStore implements BatchRateLimitStore, StateSeed
         this.gcraScript = LuaScript.load("/lua/gcra.lua");
         this.chainScript = LuaScript.load("/lua/chain.lua");
         this.seedScript = LuaScript.load("/lua/seed.lua");
+        this.registerScript = LuaScript.load("/lua/register_policies.lua");
     }
 
     @Override
-    public StoreResult tryAcquire(String storageKey, Limit limit, Algorithm algorithm, long weight) {
+    public CompletionStage<Void> registerPolicies(List<PolicyBinding> candidate) {
+        List<PolicyBinding> bindings = List.copyOf(candidate);
+        if (bindings.isEmpty()) return CompletableFuture.completedFuture(null);
+        String namespace = bindings.get(0).domain().namespace();
+        String[] args = new String[bindings.size() * 2];
+        for (int i = 0; i < bindings.size(); i++) {
+            PolicyBinding binding = bindings.get(i);
+            if (!namespace.equals(binding.domain().namespace())) {
+                throw new IllegalArgumentException("one registration candidate must use one namespace");
+            }
+            args[2 * i] = RedisKeyScheme.policyDigest(binding.policyId());
+            args[2 * i + 1] = binding.scope().wireName() + ":" + RedisKeyScheme.domainDigest(binding.domain());
+        }
+        return evalWithFallback(registerScript, new String[] {keyScheme.manifestKey(namespace)}, args)
+                .thenApply(reply -> {
+                    long result = number(reply, 0);
+                    if (result != 1) {
+                        throw new PolicyConfigurationException(switch ((int) result) {
+                            case -1 -> "quota namespace is not ready; explicit provisioning is required";
+                            case -2 -> "policy scope or root domain conflicts with the namespace binding";
+                            case -3 -> "namespace policy registration budget is exhausted";
+                            default -> "quota namespace manifest is incompatible or corrupt";
+                        });
+                    }
+                    for (PolicyBinding binding : bindings) {
+                        verifiedBindings.add(binding);
+                    }
+                    return null;
+                });
+    }
+
+    private CompletionStage<List<Object>> evalRegistered(
+            LuaScript script, String[] keys, String[] args, List<BucketIdentity> buckets) {
+        List<PolicyBinding> missing = null;
+        for (BucketIdentity bucket : buckets) {
+            PolicyBinding binding = PolicyBinding.of(bucket);
+            if (!verifiedBindings.contains(binding)) {
+                if (missing == null) missing = new ArrayList<>();
+                missing.add(binding);
+            }
+        }
+        if (missing == null) return evalWithFallback(script, keys, args);
+        return registerPolicies(missing).thenCompose(ignored -> evalWithFallback(script, keys, args));
+    }
+
+    @Override
+    public StoreResult tryAcquire(BucketIdentity storageKey, Limit limit, Algorithm algorithm, long weight) {
         return tryAcquireAsync(storageKey, limit, algorithm, weight).toCompletableFuture().join();
     }
 
     @Override
     public CompletionStage<StoreResult> tryAcquireAsync(
-            String storageKey, Limit limit, Algorithm algorithm, long weight) {
+            BucketIdentity storageKey, Limit limit, Algorithm algorithm, long weight) {
         Objects.requireNonNull(storageKey, "storageKey");
         Objects.requireNonNull(limit, "limit");
         Objects.requireNonNull(algorithm, "algorithm");
@@ -168,16 +222,14 @@ public final class RedisRateLimitStore implements BatchRateLimitStore, StateSeed
         LuaScript script = algorithm == Algorithm.TOKEN_BUCKET ? tokenBucketScript : gcraScript;
         String[] keys = {keyScheme.singleKey(storageKey)};
         String[] args = limitArgs(limit, weight);
-        return evalWithFallback(script, keys, args).thenApply(RedisRateLimitStore::toStoreResult);
+        return evalRegistered(script, keys, args, List.of(storageKey))
+                .thenApply(RedisRateLimitStore::toStoreResult);
     }
 
     @Override
     public CompletionStage<ChainResult> tryAcquireAll(List<LevelRequest> chain) {
-        Objects.requireNonNull(chain, "chain");
-        if (chain.isEmpty()) {
-            throw new IllegalArgumentException("chain must not be empty");
-        }
-        List<String> storageKeys = chain.stream().map(LevelRequest::storageKey).toList();
+        LevelRequest.validateChain(chain);
+        List<BucketIdentity> storageKeys = chain.stream().map(LevelRequest::storageKey).toList();
         String[] keys = keyScheme.chainKeys(storageKeys).toArray(String[]::new);
         String[] args = new String[chain.size() * 5];
         for (int i = 0; i < chain.size(); i++) {
@@ -189,7 +241,8 @@ public final class RedisRateLimitStore implements BatchRateLimitStore, StateSeed
             args[base + 3] = periodMicros(level.limit());
             args[base + 4] = Long.toString(level.weight());
         }
-        return evalWithFallback(chainScript, keys, args).thenApply(RedisRateLimitStore::toChainResult);
+        return evalRegistered(chainScript, keys, args, storageKeys)
+                .thenApply(RedisRateLimitStore::toChainResult);
     }
 
     /**
@@ -201,15 +254,23 @@ public final class RedisRateLimitStore implements BatchRateLimitStore, StateSeed
      * timeout; the stage completes exceptionally if any write fails.
      */
     @Override
-    public CompletionStage<Void> seed(String chainLeafStorageKey, List<BucketState> buckets) {
-        Objects.requireNonNull(chainLeafStorageKey, "chainLeafStorageKey");
+    public CompletionStage<Void> seed(QuotaDomain domain, List<BucketState> buckets) {
+        Objects.requireNonNull(domain, "domain");
         Objects.requireNonNull(buckets, "buckets");
         if (buckets.isEmpty()) {
             return CompletableFuture.completedFuture(null);
         }
+        List<BucketState> snapshot = List.copyOf(buckets);
+        // Validate the entire batch before the first write, including its domain.
+        for (BucketState bucket : snapshot) keyScheme.chainLevelKey(domain, bucket.storageKey());
+        return registerPolicies(snapshot.stream().map(bucket -> PolicyBinding.of(bucket.storageKey())).distinct().toList())
+                .thenCompose(ignored -> seedRegistered(snapshot));
+    }
+
+    private CompletionStage<Void> seedRegistered(List<BucketState> buckets) {
         List<CompletableFuture<java.util.List<Object>>> writes = new ArrayList<>(buckets.size());
         for (BucketState bucket : buckets) {
-            String key = keyScheme.chainLevelKey(chainLeafStorageKey, bucket.storageKey());
+            String key = keyScheme.singleKey(bucket.storageKey());
             String[] args = {
                 algorithmTag(bucket.algorithm()),
                 Long.toString(bucket.limit().capacity()),
@@ -251,9 +312,11 @@ public final class RedisRateLimitStore implements BatchRateLimitStore, StateSeed
             if (isNoScript(error)) {
                 return eval(script, keys, args);
             }
+            verifiedBindings.clear();
             return CompletableFuture.<java.util.List<Object>>failedFuture(error);
         }).thenCompose(stage -> stage);
-        return recovered.orTimeout(config.commandTimeout().toMillis(), TimeUnit.MILLISECONDS);
+        return recovered.orTimeout(config.commandTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                .whenComplete((ignored, error) -> { if (error != null) verifiedBindings.clear(); });
     }
 
     private CompletableFuture<java.util.List<Object>> evalsha(LuaScript script, String[] keys, String[] args) {

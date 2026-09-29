@@ -1,5 +1,8 @@
 package io.quotaflow.store.redis;
 
+import static io.quotaflow.testing.TestIdentities.key;
+import io.quotaflow.core.store.BucketIdentity;
+
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -25,7 +28,7 @@ class RedisRateLimitStoreConnectTest extends RedisContainerSupport {
                 redisUri(), RedisStoreConfig.defaults(), Duration.ofSeconds(2));
         try {
             assertTrue(store.tryAcquire(
-                            storageKey("connect", "global", "k"), new Limit(1, 1, Duration.ofSeconds(1)),
+                            key(storageKey("connect", "global", "k")), new Limit(1, 1, Duration.ofSeconds(1)),
                             Algorithm.TOKEN_BUCKET, 1)
                     .acquired());
         } finally {

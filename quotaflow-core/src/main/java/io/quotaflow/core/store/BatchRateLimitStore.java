@@ -22,7 +22,7 @@ public interface BatchRateLimitStore extends RateLimitStore {
      * level's weight at every level if all levels admit the request; consumes
      * nothing anywhere otherwise.
      *
-     * @param chain levels ordered root-to-leaf; must be non-empty
+     * @param chain distinct canonical buckets in one domain, ordered root-to-leaf; must be non-empty
      * @return the chain outcome; see {@link ChainResult} for the exact
      *         remaining/retry-after semantics
      */

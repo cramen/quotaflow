@@ -31,6 +31,11 @@ public class QuotaFlowProperties {
 
     /** Master switch of the integration; everything backs off when false. */
     private boolean enabled = true;
+    private String namespace = io.quotaflow.core.store.QuotaDomain.DEFAULT_NAMESPACE;
+
+    /** Immutable deployment namespace; provision its Redis state before activation. */
+    public String getNamespace() { return namespace; }
+    public void setNamespace(String namespace) { this.namespace = namespace; }
 
     /** Fail startup when no reachable Redis is found instead of degrading to local-only mode. */
     private boolean failOnRedisMissing = false;

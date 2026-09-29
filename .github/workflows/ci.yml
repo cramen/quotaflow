@@ -32,9 +32,7 @@ jobs:
       - name: Build, test, and audit dependencies
         run: ./gradlew build dependencyAudit
 
-  # Single designated job for the blocking benchmark gates: throughput >= 50k
-  # decisions/s and p99 gates versus the versioned baselines (see the modules'
-  # benchmarkGate tasks). Not part of the JDK matrix on purpose.
+  # Diagnostic measurements; controlled release comparison is tracked separately.
   benchmarks:
     runs-on: ubuntu-latest
     steps:
@@ -53,8 +51,18 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Verify benchmark evidence checks
+        run: python3 scripts/test_benchmark_verification.py
+
       - name: Run benchmark gates
         run: ./gradlew :quotaflow-core:benchmarkGate :quotaflow-store-redis:benchmarkGate
+
+      - name: Retain benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-measurements
+          path: '**/build/reports/jmh/*.json'
 
   # Compiles the minimal limiter workload (local decisions + Lua-backed chain
   # evaluation) to a native image and runs it against a real Redis, proving

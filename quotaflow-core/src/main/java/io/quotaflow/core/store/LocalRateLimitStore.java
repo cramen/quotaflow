@@ -59,8 +59,9 @@ public final class LocalRateLimitStore implements BatchRateLimitStore {
         }
     }
 
-    private final ConcurrentHashMap<String, Object> cells = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<BucketIdentity, Object> cells = new ConcurrentHashMap<>();
     private final LongSupplier nanoClock;
+    private final LocalPolicyBindings bindings;
 
     public LocalRateLimitStore() {
         this(System::nanoTime);
@@ -68,17 +69,29 @@ public final class LocalRateLimitStore implements BatchRateLimitStore {
 
     /** @param nanoClock monotonic nanosecond clock; injectable for deterministic tests */
     public LocalRateLimitStore(LongSupplier nanoClock) {
+        this(nanoClock, LocalPolicyBindings.DEFAULT_MAX_REGISTERED_POLICIES);
+    }
+
+    public LocalRateLimitStore(LongSupplier nanoClock, int maxRegisteredPolicies) {
         this.nanoClock = Objects.requireNonNull(nanoClock, "nanoClock");
+        this.bindings = new LocalPolicyBindings(maxRegisteredPolicies);
     }
 
     @Override
-    public StoreResult tryAcquire(String storageKey, Limit limit, Algorithm algorithm, long weight) {
+    public CompletionStage<Void> registerPolicies(List<PolicyBinding> candidate) {
+        bindings.register(candidate);
+        return CompletableFuture.completedFuture(null);
+    }
+
+    @Override
+    public StoreResult tryAcquire(BucketIdentity storageKey, Limit limit, Algorithm algorithm, long weight) {
         Objects.requireNonNull(storageKey, "storageKey");
         Objects.requireNonNull(limit, "limit");
         Objects.requireNonNull(algorithm, "algorithm");
         if (weight < 1) {
             throw new IllegalArgumentException("weight must be >= 1, got " + weight);
         }
+        bindings.register(storageKey);
         return switch (algorithm) {
             case TOKEN_BUCKET -> acquireTokenBucket(storageKey, limit, weight);
             case GCRA -> acquireGcra(storageKey, limit, weight);
@@ -87,7 +100,7 @@ public final class LocalRateLimitStore implements BatchRateLimitStore {
 
     @Override
     public CompletionStage<StoreResult> tryAcquireAsync(
-            String storageKey, Limit limit, Algorithm algorithm, long weight) {
+            BucketIdentity storageKey, Limit limit, Algorithm algorithm, long weight) {
         return CompletableFuture.completedFuture(tryAcquire(storageKey, limit, algorithm, weight));
     }
 
@@ -99,10 +112,8 @@ public final class LocalRateLimitStore implements BatchRateLimitStore {
      */
     @Override
     public CompletionStage<ChainResult> tryAcquireAll(List<LevelRequest> chain) {
-        Objects.requireNonNull(chain, "chain");
-        if (chain.isEmpty()) {
-            throw new IllegalArgumentException("chain must not be empty");
-        }
+        LevelRequest.validateChain(chain);
+        bindings.register(chain.stream().map(level -> PolicyBinding.of(level.storageKey())).toList());
         List<StoreResult> admitted = new ArrayList<>(chain.size());
         for (int i = 0; i < chain.size(); i++) {
             LevelRequest level = chain.get(i);
@@ -143,7 +154,7 @@ public final class LocalRateLimitStore implements BatchRateLimitStore {
     public List<BucketState> snapshot() {
         long now = nanoClock.getAsLong();
         List<BucketState> active = new ArrayList<>();
-        for (Map.Entry<String, Object> entry : cells.entrySet()) {
+        for (Map.Entry<BucketIdentity, Object> entry : cells.entrySet()) {
             Object cell = entry.getValue();
             if (cell instanceof TokenBucketState state) {
                 Limit limit = state.limit;
@@ -176,7 +187,7 @@ public final class LocalRateLimitStore implements BatchRateLimitStore {
         return cells.size();
     }
 
-    private StoreResult acquireTokenBucket(String storageKey, Limit limit, long weight) {
+    private StoreResult acquireTokenBucket(BucketIdentity storageKey, Limit limit, long weight) {
         double interval = limit.emissionIntervalNanos();
         double capacity = limit.capacity();
         while (true) {
@@ -200,7 +211,7 @@ public final class LocalRateLimitStore implements BatchRateLimitStore {
         }
     }
 
-    private StoreResult acquireGcra(String storageKey, Limit limit, long weight) {
+    private StoreResult acquireGcra(BucketIdentity storageKey, Limit limit, long weight) {
         double interval = limit.emissionIntervalNanos();
         double tau = limit.capacity() * interval;
         while (true) {
@@ -229,14 +240,14 @@ public final class LocalRateLimitStore implements BatchRateLimitStore {
      * concurrent acquisitions; a cell that disappeared in between — swept
      * because it had refilled to full — needs no credit.
      */
-    private void rollback(String storageKey, Limit limit, Algorithm algorithm, long weight) {
+    private void rollback(BucketIdentity storageKey, Limit limit, Algorithm algorithm, long weight) {
         switch (algorithm) {
             case TOKEN_BUCKET -> rollbackTokenBucket(storageKey, limit, weight);
             case GCRA -> rollbackGcra(storageKey, limit, weight);
         }
     }
 
-    private void rollbackTokenBucket(String storageKey, Limit limit, long weight) {
+    private void rollbackTokenBucket(BucketIdentity storageKey, Limit limit, long weight) {
         double interval = limit.emissionIntervalNanos();
         double capacity = limit.capacity();
         while (true) {
@@ -254,7 +265,7 @@ public final class LocalRateLimitStore implements BatchRateLimitStore {
         }
     }
 
-    private void rollbackGcra(String storageKey, Limit limit, long weight) {
+    private void rollbackGcra(BucketIdentity storageKey, Limit limit, long weight) {
         double interval = limit.emissionIntervalNanos();
         while (true) {
             Object current = cells.get(storageKey);
@@ -277,7 +288,7 @@ public final class LocalRateLimitStore implements BatchRateLimitStore {
         return Math.max(1, (long) Math.ceil(nanos / 1_000_000.0));
     }
 
-    private boolean compareAndSet(String storageKey, Object expected, Object next) {
+    private boolean compareAndSet(BucketIdentity storageKey, Object expected, Object next) {
         if (expected == null) {
             return cells.putIfAbsent(storageKey, next) == null;
         }

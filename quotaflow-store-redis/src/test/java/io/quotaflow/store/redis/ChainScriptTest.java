@@ -1,5 +1,8 @@
 package io.quotaflow.store.redis;
 
+import static io.quotaflow.testing.TestIdentities.key;
+import io.quotaflow.core.store.BucketIdentity;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -29,9 +32,9 @@ class ChainScriptTest extends RedisContainerSupport {
         Limit user = new Limit(userCap, 1, Duration.ofSeconds(10));
         String suffix = "-" + run;
         return List.of(
-                new LevelRequest("g:global:global" + suffix, global, Algorithm.TOKEN_BUCKET, 1),
-                new LevelRequest("t:tenant:acme" + suffix, tenant, Algorithm.TOKEN_BUCKET, 1),
-                new LevelRequest("u:user:alice" + suffix, user, Algorithm.TOKEN_BUCKET, 1));
+                new LevelRequest(key("g:global:global" + suffix), global, Algorithm.TOKEN_BUCKET, 1),
+                new LevelRequest(key("t:tenant:acme" + suffix), tenant, Algorithm.TOKEN_BUCKET, 1),
+                new LevelRequest(key("u:user:alice" + suffix), user, Algorithm.TOKEN_BUCKET, 1));
     }
 
     @Test
@@ -100,9 +103,9 @@ class ChainScriptTest extends RedisContainerSupport {
         String run = UUID.randomUUID().toString();
         String suffix = "-" + run;
         List<LevelRequest> chain = List.of(
-                new LevelRequest("g:global:global" + suffix,
+                new LevelRequest(key("g:global:global" + suffix),
                         new Limit(1, 1, Duration.ofSeconds(10)), Algorithm.GCRA, 1),
-                new LevelRequest("u:user:alice" + suffix,
+                new LevelRequest(key("u:user:alice" + suffix),
                         new Limit(3, 1, Duration.ofSeconds(10)), Algorithm.TOKEN_BUCKET, 2));
         try (StatefulRedisConnection<String, String> connection = client().connect();
                 RedisRateLimitStore store = newStore(connection)) {
@@ -125,9 +128,9 @@ class ChainScriptTest extends RedisContainerSupport {
         String run = UUID.randomUUID().toString();
         String suffix = "-" + run;
         List<LevelRequest> chain = List.of(
-                new LevelRequest("g:global:global" + suffix,
+                new LevelRequest(key("g:global:global" + suffix),
                         new Limit(100, 1, Duration.ofSeconds(10)), Algorithm.TOKEN_BUCKET, 1),
-                new LevelRequest("t:tenant:acme" + suffix,
+                new LevelRequest(key("t:tenant:acme" + suffix),
                         new Limit(1, 1, Duration.ofSeconds(2)), Algorithm.TOKEN_BUCKET, 1));
         try (StatefulRedisConnection<String, String> connection = client().connect();
                 RedisRateLimitStore store = newStore(connection)) {

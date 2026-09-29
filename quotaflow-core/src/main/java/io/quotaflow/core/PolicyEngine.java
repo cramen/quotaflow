@@ -1,6 +1,9 @@
 package io.quotaflow.core;
 
 import io.quotaflow.core.store.BatchRateLimitStore;
+import io.quotaflow.core.store.BucketIdentity;
+import io.quotaflow.core.store.QuotaDomain;
+import io.quotaflow.core.store.PolicyBinding;
 import io.quotaflow.core.store.ChainResult;
 import io.quotaflow.core.store.LevelRequest;
 import io.quotaflow.core.store.RateLimitStore;
@@ -48,6 +51,7 @@ public final class PolicyEngine {
     private static final Logger log = LoggerFactory.getLogger(PolicyEngine.class);
 
     private final RateLimitStore store;
+    private final String namespace;
     private final KeyResolver defaultResolver;
     private final Map<String, KeyResolver> namedResolvers;
     private final LimitResolver limitResolver;
@@ -72,10 +76,23 @@ public final class PolicyEngine {
             KeyResolver defaultResolver,
             Map<String, KeyResolver> namedResolvers,
             LimitResolver limitResolver) {
+        this(store, defaultResolver, namedResolvers, limitResolver, QuotaDomain.DEFAULT_NAMESPACE);
+    }
+
+    public PolicyEngine(RateLimitStore store, KeyResolver defaultResolver,
+            Map<String, KeyResolver> namedResolvers, LimitResolver limitResolver, String namespace) {
+        this.namespace = new QuotaDomain(namespace, "validation").namespace();
         this.store = Objects.requireNonNull(store, "store");
         this.defaultResolver = Objects.requireNonNull(defaultResolver, "defaultResolver");
         this.namedResolvers = Map.copyOf(Objects.requireNonNull(namedResolvers, "namedResolvers"));
         this.limitResolver = limitResolver;
+    }
+
+    /** Validates a complete candidate before the facade publishes it. */
+    public CompletionStage<Void> registerPolicies(PolicySet policies) {
+        return store.registerPolicies(policies.policies().stream().map(policy -> new PolicyBinding(
+                new QuotaDomain(namespace, policies.rootPolicyId(policy.id())),
+                policy.id(), policy.scope())).toList());
     }
 
     /**
@@ -229,7 +246,9 @@ public final class PolicyEngine {
                 levels.add(PendingLevel.unresolvableLimit(policy, key.keyGroup()));
                 return levels;
             }
-            String storageKey = policy.id() + ':' + policy.scope().wireName() + ':' + key.rawKey();
+            BucketIdentity storageKey = new BucketIdentity(
+                    new QuotaDomain(namespace, policies.rootPolicyId(policy.id())),
+                    policy.id(), policy.scope(), key.rawKey());
             levels.add(PendingLevel.resolved(policy, storageKey, key.keyGroup(), limit));
         }
         return levels;
@@ -291,18 +310,18 @@ public final class PolicyEngine {
     private static final class PendingLevel {
 
         private final RateLimitPolicy policy;
-        private final String storageKey;
+        private final BucketIdentity storageKey;
         private final String keyGroup;
         private final Limit limit;
 
-        private PendingLevel(RateLimitPolicy policy, String storageKey, String keyGroup, Limit limit) {
+        private PendingLevel(RateLimitPolicy policy, BucketIdentity storageKey, String keyGroup, Limit limit) {
             this.policy = policy;
             this.storageKey = storageKey;
             this.keyGroup = keyGroup;
             this.limit = limit;
         }
 
-        static PendingLevel resolved(RateLimitPolicy policy, String storageKey, String keyGroup, Limit limit) {
+        static PendingLevel resolved(RateLimitPolicy policy, BucketIdentity storageKey, String keyGroup, Limit limit) {
             return new PendingLevel(policy, storageKey, keyGroup, limit);
         }
 
@@ -318,7 +337,7 @@ public final class PolicyEngine {
             return policy;
         }
 
-        String storageKey() {
+        BucketIdentity storageKey() {
             return storageKey;
         }
 

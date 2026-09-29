@@ -1,5 +1,8 @@
 package io.quotaflow.fallback;
 
+import static io.quotaflow.testing.TestIdentities.key;
+import io.quotaflow.core.store.BucketIdentity;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -35,14 +38,24 @@ class FallbackThrottleTest {
 
     /** Primary that is permanently down: every call fails immediately. */
     private static final class DownPrimary implements BatchRateLimitStore {
+        private final io.quotaflow.core.store.LocalPolicyBindings policyBindings =
+                new io.quotaflow.core.store.LocalPolicyBindings();
+
         @Override
-        public StoreResult tryAcquire(String storageKey, Limit limit, Algorithm algorithm, long weight) {
+        public java.util.concurrent.CompletionStage<Void> registerPolicies(
+                java.util.List<io.quotaflow.core.store.PolicyBinding> bindings) {
+            policyBindings.register(bindings);
+            return java.util.concurrent.CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        public StoreResult tryAcquire(BucketIdentity storageKey, Limit limit, Algorithm algorithm, long weight) {
             throw new IllegalStateException("primary is down");
         }
 
         @Override
         public CompletionStage<StoreResult> tryAcquireAsync(
-                String storageKey, Limit limit, Algorithm algorithm, long weight) {
+                BucketIdentity storageKey, Limit limit, Algorithm algorithm, long weight) {
             throw new IllegalStateException("primary is down");
         }
 

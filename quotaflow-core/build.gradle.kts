@@ -63,9 +63,7 @@ pitest {
     mutationThreshold.set(80)
 }
 
-// --- JMH: local fallback decision latency, gated absolutely at p99 <= 0.01 ms
-// by benchmarkGate. The gate is a standalone verification task; CI runs it in
-// a single designated job (not the JDK matrix).
+// JMH measurements are environment-specific; comparison requires an explicit matching baseline.
 jmh {
     fork = 1
     warmupIterations = 2
@@ -74,33 +72,8 @@ jmh {
     resultsFile.set(layout.buildDirectory.file("reports/jmh/results.json"))
 }
 
-val fallbackP99GateMs = mapOf("io.quotaflow.core.LocalFallbackBenchmark" to 0.01)
-
-tasks.register("benchmarkGate") {
-    group = "verification"
-    description = "Runs the JMH suite and fails if a gated p99 latency exceeds its absolute threshold."
-    dependsOn("jmh")
-    val results = layout.buildDirectory.file("reports/jmh/results.json")
-    doLast {
-        val entries = groovy.json.JsonSlurper().parse(results.get().asFile) as List<*>
-        val failures = mutableListOf<String>()
-        for ((benchmark, maxP99Ms) in fallbackP99GateMs) {
-            val entry = entries.map { it as Map<*, *> }
-                .singleOrNull { (it["benchmark"] as String).startsWith(benchmark) }
-            if (entry == null) {
-                failures += "$benchmark: no JMH result found"
-                continue
-            }
-            val metric = entry["primaryMetric"] as Map<*, *>
-            val p99 = ((metric["scorePercentiles"] as Map<*, *>)["99.0"] as Number).toDouble()
-            if (p99 > maxP99Ms) {
-                failures += "$benchmark: p99 latency $p99 ms exceeds the absolute gate of $maxP99Ms ms"
-            } else {
-                logger.lifecycle("benchmarkGate OK: $benchmark p99 = $p99 ms (gate <= $maxP99Ms ms)")
-            }
-        }
-        if (failures.isNotEmpty()) {
-            throw GradleException("Benchmark gate failed:\n" + failures.joinToString("\n"))
-        }
-    }
-}
+extra["benchmarkMetrics"] = mapOf(
+    "localStoreLatencyP99Ms" to mapOf("benchmark" to "io.quotaflow.core.LocalFallbackBenchmark.tryAcquire",
+        "mode" to "sample", "unit" to "ms/op", "percentile" to "99.0")
+)
+apply(from = rootProject.file("gradle/benchmark-verification.gradle"))

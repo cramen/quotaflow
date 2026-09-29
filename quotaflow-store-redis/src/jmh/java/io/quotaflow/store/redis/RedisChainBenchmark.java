@@ -4,6 +4,9 @@ import io.quotaflow.core.Algorithm;
 import io.quotaflow.core.Limit;
 import io.quotaflow.core.store.ChainResult;
 import io.quotaflow.core.store.LevelRequest;
+import io.quotaflow.core.store.BucketIdentity;
+import io.quotaflow.core.store.QuotaDomain;
+import io.quotaflow.core.store.PolicyBinding;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -26,14 +29,9 @@ import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * Distributed allow path: whole-chain evaluation against a real Redis in one
- * round-trip per decision. Two benchmark shapes feed the {@code benchmarkGate}
- * task: batched asynchronous single-level chain evaluation for the throughput
- * gate (&ge; 50k decisions/s, plus regression versus the versioned baseline —
- * single-level because the measurement is server-CPU-bound and isolates the
- * per-decision cost of the chain script) and a synchronous two-level chain —
- * the realistic policy shape — for the p99 latency baseline. Limits are sized
- * so every call takes the allow path.
+ * Distributed allow path with one genuinely shared provider and many tenants.
+ * Both throughput and latency evaluate the same two-level atomic hierarchy;
+ * distinct tenants never duplicate the parent's budget or distribute its slot.
  */
 @State(Scope.Benchmark)
 @Threads(8)
@@ -46,36 +44,46 @@ public class RedisChainBenchmark {
 
     private GenericContainer<?> redis;
     private RedisRateLimitStore store;
-    private List<List<LevelRequest>> singleLevelChains;
     private List<List<LevelRequest>> twoLevelChains;
 
     @Setup(Level.Trial)
     public void setup() {
-        redis = new GenericContainer<>(DockerImageName.parse("redis:6.2-alpine")).withExposedPorts(6379);
-        redis.start();
+        String url = System.getenv("QUOTAFLOW_BENCHMARK_REDIS_URL");
+        if (url == null || url.isBlank()) {
+            redis = new GenericContainer<>(DockerImageName.parse("redis:6.2-alpine")).withExposedPorts(6379);
+            redis.start();
+            url = "redis://" + redis.getHost() + ':' + redis.getMappedPort(6379);
+        }
+        String namespace = "benchmark-" + java.util.UUID.randomUUID();
+        var provisioningClient = RedisClientFactory.createClient(url, Duration.ofSeconds(5));
+        try (var connection = provisioningClient.connect()) {
+            new RedisNamespaceAdmin(connection).provisionFresh(namespace, true);
+        } finally { provisioningClient.shutdown(); }
         store = RedisRateLimitStore.connect(
-                "redis://" + redis.getHost() + ':' + redis.getMappedPort(6379),
+                url,
                 // generous command timeout: the throughput benchmark deliberately queues
                 // thousands of in-flight evaluations, which the production-style 100 ms
                 // bound would surface as timeouts instead of measuring the allow path
                 new RedisStoreConfig(Duration.ofSeconds(5), Duration.ofSeconds(30)),
                 Duration.ofSeconds(5));
-        Limit limit = new Limit(1_000_000_000, 1_000_000_000, Duration.ofSeconds(1));
-        singleLevelChains = new ArrayList<>(CHAIN_POOL);
+        Limit limit = new Limit(1_000_000_000, 1_000_000, Duration.ofSeconds(1));
         twoLevelChains = new ArrayList<>(CHAIN_POOL);
+        QuotaDomain domain = new QuotaDomain(namespace, "provider");
+        BucketIdentity parent = new BucketIdentity(domain, "provider", io.quotaflow.core.Scope.GLOBAL, "shared");
+        store.registerPolicies(List.of(PolicyBinding.of(parent),
+                new PolicyBinding(domain, "tenant", io.quotaflow.core.Scope.TENANT))).toCompletableFuture().join();
         for (int i = 0; i < CHAIN_POOL; i++) {
-            singleLevelChains.add(List.of(
-                    new LevelRequest("bench:global:" + i, limit, Algorithm.TOKEN_BUCKET, 1)));
             twoLevelChains.add(List.of(
-                    new LevelRequest("bench:global:" + i, limit, Algorithm.TOKEN_BUCKET, 1),
-                    new LevelRequest("bench:tenant:" + i, limit, Algorithm.TOKEN_BUCKET, 1)));
+                    new LevelRequest(parent, limit, Algorithm.TOKEN_BUCKET, 1),
+                    new LevelRequest(new BucketIdentity(domain, "tenant", io.quotaflow.core.Scope.TENANT,
+                            Integer.toString(i)), limit, Algorithm.TOKEN_BUCKET, 1)));
         }
     }
 
     @TearDown(Level.Trial)
     public void tearDown() {
         store.close();
-        redis.stop();
+        if (redis != null) redis.stop();
     }
 
     @Benchmark
@@ -85,16 +93,23 @@ public class RedisChainBenchmark {
     public void chainAllowThroughput(Blackhole blackhole) {
         CompletableFuture<ChainResult>[] batch = new CompletableFuture[BATCH];
         for (int i = 0; i < BATCH; i++) {
-            batch[i] = store.tryAcquireAll(randomChain(singleLevelChains)).toCompletableFuture();
+            batch[i] = store.tryAcquireAll(randomChain(twoLevelChains)).toCompletableFuture();
         }
-        blackhole.consume(CompletableFuture.allOf(batch).join());
+        CompletableFuture.allOf(batch).join();
+        for (CompletableFuture<ChainResult> result : batch) {
+            ChainResult decision = result.join();
+            if (!decision.acquired()) throw new IllegalStateException("allow-path benchmark exhausted its quota");
+            blackhole.consume(decision);
+        }
     }
 
     @Benchmark
     @BenchmarkMode(Mode.SampleTime)
     @OutputTimeUnit(TimeUnit.MILLISECONDS)
     public ChainResult chainAllowLatency() {
-        return store.tryAcquireAll(randomChain(twoLevelChains)).toCompletableFuture().join();
+        ChainResult decision = store.tryAcquireAll(randomChain(twoLevelChains)).toCompletableFuture().join();
+        if (!decision.acquired()) throw new IllegalStateException("allow-path benchmark exhausted its quota");
+        return decision;
     }
 
     private List<LevelRequest> randomChain(List<List<LevelRequest>> pool) {

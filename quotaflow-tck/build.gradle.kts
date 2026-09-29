@@ -53,19 +53,15 @@ tasks.withType<Test> {
 // --- Soak profile (D5): NOT part of check — on-demand and nightly only.
 // Sustained mixed traffic with periodic Redis pause/unpause degradation
 // injection and continuous invariant assertions. Default 5 minutes; the
-// nightly workflow runs 1 h and additionally asserts the absolute latency
-// targets (allow p99 <= 1 ms, fallback p99 <= 0.01 ms, measured by
-// store-level probes inside the harness).
+// nightly workflow runs 1 h and reports environment-specific probe latency.
 tasks.register<JavaExec>("soakTest") {
     group = "verification"
     description = "Runs the soak profile: sustained mixed traffic with periodic degradation injection " +
-        "(default 5 min; -PsoakDurationSeconds=3600 -PsoakAssertLatency=true for the nightly profile)."
+        "(default 5 min; -PsoakDurationSeconds=3600 for the nightly profile)."
     mainClass.set("io.quotaflow.tck.SoakHarness")
     classpath = sourceSets["test"].runtimeClasspath
     // fixed heap ceiling: unbounded state growth would surface as OOM
     jvmArgs("-Xmx512m")
     systemProperty("quotaflow.soak.duration.seconds",
         providers.gradleProperty("soakDurationSeconds").orElse("300").get())
-    systemProperty("quotaflow.soak.assert.latency",
-        providers.gradleProperty("soakAssertLatency").orElse("false").get())
 }

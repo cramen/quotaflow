@@ -1,5 +1,8 @@
 package io.quotaflow.core;
 
+import static io.quotaflow.testing.TestIdentities.key;
+import io.quotaflow.core.store.BucketIdentity;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -32,6 +35,16 @@ class PolicyEngineBatchTest {
      * because these tests assert the engine's mapping, not store atomicity.
      */
     private static final class FakeBatchStore implements BatchRateLimitStore {
+        private final io.quotaflow.core.store.LocalPolicyBindings policyBindings =
+                new io.quotaflow.core.store.LocalPolicyBindings();
+
+        @Override
+        public java.util.concurrent.CompletionStage<Void> registerPolicies(
+                java.util.List<io.quotaflow.core.store.PolicyBinding> bindings) {
+            policyBindings.register(bindings);
+            return java.util.concurrent.CompletableFuture.completedFuture(null);
+        }
+
         private final LocalRateLimitStore delegate;
         private final AtomicInteger batchCalls = new AtomicInteger();
         private final AtomicInteger perLevelCalls = new AtomicInteger();
@@ -49,7 +62,7 @@ class PolicyEngineBatchTest {
             for (int i = 0; i < chain.size(); i++) {
                 LevelRequest level = chain.get(i);
                 StoreResult result =
-                        delegate.tryAcquire(level.storageKey(), level.limit(), level.algorithm(), level.weight());
+                        delegate.tryAcquire(key(level.storageKey()), level.limit(), level.algorithm(), level.weight());
                 if (!result.acquired()) {
                     return CompletableFuture.completedFuture(
                             ChainResult.rejected(i, result.remaining(), result.retryAfterMillis()));
@@ -61,14 +74,14 @@ class PolicyEngineBatchTest {
         }
 
         @Override
-        public StoreResult tryAcquire(String storageKey, Limit limit, Algorithm algorithm, long weight) {
+        public StoreResult tryAcquire(BucketIdentity storageKey, Limit limit, Algorithm algorithm, long weight) {
             perLevelCalls.incrementAndGet();
-            return delegate.tryAcquire(storageKey, limit, algorithm, weight);
+            return delegate.tryAcquire(key(storageKey), limit, algorithm, weight);
         }
 
         @Override
         public CompletionStage<StoreResult> tryAcquireAsync(
-                String storageKey, Limit limit, Algorithm algorithm, long weight) {
+                BucketIdentity storageKey, Limit limit, Algorithm algorithm, long weight) {
             return CompletableFuture.completedFuture(tryAcquire(storageKey, limit, algorithm, weight));
         }
     }
@@ -188,6 +201,16 @@ class PolicyEngineBatchTest {
     }
 
     private static final class CountingStore implements RateLimitStore {
+        private final io.quotaflow.core.store.LocalPolicyBindings policyBindings =
+                new io.quotaflow.core.store.LocalPolicyBindings();
+
+        @Override
+        public java.util.concurrent.CompletionStage<Void> registerPolicies(
+                java.util.List<io.quotaflow.core.store.PolicyBinding> bindings) {
+            policyBindings.register(bindings);
+            return java.util.concurrent.CompletableFuture.completedFuture(null);
+        }
+
         private final RateLimitStore delegate;
         private final AtomicInteger calls = new AtomicInteger();
 
@@ -196,16 +219,16 @@ class PolicyEngineBatchTest {
         }
 
         @Override
-        public StoreResult tryAcquire(String storageKey, Limit limit, Algorithm algorithm, long weight) {
+        public StoreResult tryAcquire(BucketIdentity storageKey, Limit limit, Algorithm algorithm, long weight) {
             calls.incrementAndGet();
-            return delegate.tryAcquire(storageKey, limit, algorithm, weight);
+            return delegate.tryAcquire(key(storageKey), limit, algorithm, weight);
         }
 
         @Override
         public CompletionStage<StoreResult> tryAcquireAsync(
-                String storageKey, Limit limit, Algorithm algorithm, long weight) {
+                BucketIdentity storageKey, Limit limit, Algorithm algorithm, long weight) {
             calls.incrementAndGet();
-            return delegate.tryAcquireAsync(storageKey, limit, algorithm, weight);
+            return delegate.tryAcquireAsync(key(storageKey), limit, algorithm, weight);
         }
     }
 
@@ -214,10 +237,10 @@ class PolicyEngineBatchTest {
         assertThrows(NullPointerException.class,
                 () -> new LevelRequest(null, new Limit(1, 1, Duration.ofSeconds(1)), Algorithm.GCRA, 1));
         assertThrows(NullPointerException.class,
-                () -> new LevelRequest("k", null, Algorithm.GCRA, 1));
+                () -> new LevelRequest(key("k"), null, Algorithm.GCRA, 1));
         assertThrows(NullPointerException.class,
-                () -> new LevelRequest("k", new Limit(1, 1, Duration.ofSeconds(1)), null, 1));
+                () -> new LevelRequest(key("k"), new Limit(1, 1, Duration.ofSeconds(1)), null, 1));
         assertThrows(IllegalArgumentException.class,
-                () -> new LevelRequest("k", new Limit(1, 1, Duration.ofSeconds(1)), Algorithm.GCRA, 0));
+                () -> new LevelRequest(key("k"), new Limit(1, 1, Duration.ofSeconds(1)), Algorithm.GCRA, 0));
     }
 }

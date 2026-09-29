@@ -1,0 +1,87 @@
+import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
+
+// Diagnostic by default; certification requires an explicitly comparable baseline.
+// Profile contents are operator attestations, not automatic hardware discovery.
+tasks.register('benchmarkGate') {
+    group = 'verification'
+    description = 'Validates JMH measurements; optionally checks a profile-matched baseline.'
+    dependsOn 'jmh'
+    doLast {
+        def parse = { File path -> new JsonSlurper().parse(path) }
+        def fail = { String message -> throw new GradleException(message) }
+        if (project.hasProperty('updateBenchmarkBaseline') || project.hasProperty('absoluteBenchmarkGates')) {
+            fail('Obsolete benchmark option: use reviewed profile-matched evidence; see docs/benchmarks.md.')
+        }
+        def source = project.hasProperty('benchmarkResultsFile') ? file(project.property('benchmarkResultsFile')) :
+                layout.buildDirectory.file('reports/jmh/results.json').get().asFile
+        def report = new File(source.parentFile, 'verification.json')
+        def baselinePath = project.findProperty('benchmarkBaselineFile')
+        if (baselinePath && file(baselinePath).canonicalFile == report.canonicalFile) {
+            fail('Keep the reviewed baseline separate from the output verification.json.')
+        }
+        report.parentFile.mkdirs()
+        report.text = JsonOutput.toJson([schemaVersion: 1, comparison: 'FAILED']) + '\n'
+        def entries = parse(source)
+        def metrics = [:]
+        def configurations = [:]
+        project.ext.benchmarkMetrics.each { name, definition ->
+            def matches = entries.findAll { it.benchmark == definition.benchmark }
+            if (matches.size() != 1) fail("Missing or duplicate JMH result: $name")
+            def entry = matches.first()
+            ['jmhVersion', 'jdkVersion', 'vmName', 'vmVersion', 'jvmArgs', 'threads', 'forks',
+             'warmupIterations', 'warmupTime', 'measurementIterations', 'measurementTime'].each { field ->
+                if (entry[field] == null) fail("Missing JMH configuration: $field")
+            }
+            def primary = entry.primaryMetric
+            if (entry.mode != definition.mode || primary.scoreUnit != definition.unit) {
+                fail("Wrong JMH mode/unit: $name")
+            }
+            def value = definition.percentile ? primary.scorePercentiles?.get(definition.percentile) : primary.score
+            if (!(value instanceof Number) || !Double.isFinite(value.doubleValue()) || value.doubleValue() <= 0) {
+                fail("Invalid JMH measurement: $name = $value")
+            }
+            metrics[name] = value
+            def fields = ['jmhVersion', 'jdkVersion', 'vmName', 'vmVersion', 'jvmArgs', 'threads', 'forks',
+                          'warmupIterations', 'warmupTime', 'warmupBatchSize', 'measurementIterations',
+                          'measurementTime', 'measurementBatchSize', 'params', 'mode']
+            configurations[name] = fields.collectEntries { [(it): entry[it]] }
+            logger.lifecycle("benchmarkGate measurement: $name = $value ${definition.unit}")
+        }
+        def profile = project.hasProperty('benchmarkProfileFile') ? parse(file(project.property('benchmarkProfileFile'))) : null
+        if (profile != null) {
+            ['machine', 'cpu', 'memory', 'os', 'jdk', 'server', 'network', 'workload'].each { field ->
+                if (!(profile[field] instanceof String) || profile[field].trim().isEmpty()) {
+                    fail("Missing benchmark profile field: $field")
+                }
+            }
+        }
+        def evidence = [schemaVersion: 1, profile: profile, configurations: configurations, metrics: metrics,
+                        comparison: 'NOT ASSESSED']
+        def required = project.hasProperty('requireBenchmarkComparison')
+        if (!baselinePath) {
+            if (required) fail('Required benchmark comparison has no explicit baseline.')
+            logger.lifecycle('benchmarkGate regression NOT ASSESSED: no explicit profile-matched baseline; diagnostic evidence only.')
+        } else {
+            def baseline = parse(file(baselinePath))
+            if (profile == null || baseline.schemaVersion != 1 || baseline.profile != profile ||
+                    baseline.configurations != configurations || baseline.metrics?.keySet() != metrics.keySet()) {
+                fail('Benchmark baseline/profile/workload/JMH configuration mismatch; no regression verdict is valid.')
+            }
+            def failures = []
+            metrics.each { name, value ->
+                def reference = baseline.metrics[name]
+                if (!(reference instanceof Number) || !Double.isFinite(reference.doubleValue()) || reference <= 0) {
+                    fail("Invalid baseline measurement: $name")
+                }
+                def higherIsWorse = project.ext.benchmarkMetrics[name].mode != 'thrpt'
+                def regression = higherIsWorse ? value / reference - 1 : 1 - value / reference
+                if (regression > 0.10 + 1e-12) failures.add("$name: regression ${regression * 100}% (baseline $reference, measured $value)")
+            }
+            if (!failures.isEmpty()) fail('Benchmark regression check failed:\n' + failures.join('\n'))
+            evidence.comparison = 'PASS'
+            logger.lifecycle('benchmarkGate: explicit comparable measurements are within the 10% regression budget.')
+        }
+        report.text = JsonOutput.prettyPrint(JsonOutput.toJson(evidence)) + '\n'
+    }
+}

@@ -18,9 +18,25 @@ import java.util.Objects;
 public final class PolicySet {
 
     private final Map<String, RateLimitPolicy> policies;
+    private final Map<String, String> rootPolicyIds;
 
     private PolicySet(Map<String, RateLimitPolicy> policies) {
         this.policies = policies;
+        Map<String, String> roots = new LinkedHashMap<>();
+        for (RateLimitPolicy policy : policies.values()) {
+            RateLimitPolicy root = policy;
+            while (root.parentId().isPresent()) {
+                root = policies.get(root.parentId().orElseThrow());
+            }
+            roots.put(policy.id(), root.id());
+        }
+        this.rootPolicyIds = Map.copyOf(roots);
+    }
+
+    /** Stable slot domain for a policy, including a directly evaluated ancestor. */
+    public String rootPolicyId(String policyId) {
+        policy(policyId);
+        return rootPolicyIds.get(policyId);
     }
 
     /**

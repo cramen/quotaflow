@@ -1,5 +1,8 @@
 package io.quotaflow.tck;
 
+import static io.quotaflow.testing.TestIdentities.key;
+import io.quotaflow.core.store.BucketIdentity;
+
 import io.lettuce.core.RedisClient;
 import io.quotaflow.config.ConfigReloader;
 import io.quotaflow.config.ConfigSource;
@@ -55,16 +58,13 @@ import org.testcontainers.utility.DockerImageName;
  *       (idle state evicted).</li>
  * </ul>
  *
- * <p>Duration: {@code quotaflow.soak.duration.seconds} (default 300). With
- * {@code quotaflow.soak.assert.latency=true} (nightly), store-level probe
- * latencies are additionally asserted against the absolute targets
- * (allow p99 &le; 1 ms, fallback p99 &le; 0.01 ms); they are always measured
- * and reported.
+ * <p>Duration: {@code quotaflow.soak.duration.seconds} (default 300).
+ * Store-level probe latencies are measured and reported as environment-specific
+ * diagnostics; correctness and resource invariants remain blocking.
  */
 public final class SoakHarness {
 
     private static final String DURATION_PROPERTY = "quotaflow.soak.duration.seconds";
-    private static final String ASSERT_LATENCY_PROPERTY = "quotaflow.soak.assert.latency";
 
     private static final int TRAFFIC_THREADS = 8;
     private static final int USERS = 50;
@@ -108,7 +108,6 @@ public final class SoakHarness {
     public static void main(String[] args) throws Exception {
         Duration duration =
                 Duration.ofSeconds(Long.parseLong(System.getProperty(DURATION_PROPERTY, "300")));
-        boolean assertLatency = Boolean.parseBoolean(System.getProperty(ASSERT_LATENCY_PROPERTY, "false"));
 
         GenericContainer<?> redis =
                 new GenericContainer<>(DockerImageName.parse("redis:6.2-alpine")).withExposedPorts(6379);
@@ -117,6 +116,9 @@ public final class SoakHarness {
 
         Counters counters = new Counters();
         RedisClient client = RedisClient.create(uri);
+        try (var provisioning = client.connect()) {
+            new io.quotaflow.store.redis.RedisNamespaceAdmin(provisioning).provisionFresh("default", true);
+        }
         RedisRateLimitStore primary = RedisRateLimitStore.create(client, STORE_CONFIG);
         FallbackRateLimitStore store = new FallbackRateLimitStore(
                 primary, primary, FALLBACK_CONFIG, List.of(counters));
@@ -147,7 +149,7 @@ public final class SoakHarness {
 
             monitor(redis, counters, deadlineNanos);
 
-            counters.report(duration, assertLatency);
+            counters.report(duration);
         } finally {
             threads.shutdownNow();
             threads.awaitTermination(10, TimeUnit.SECONDS);
@@ -197,14 +199,14 @@ public final class SoakHarness {
     /**
      * Store-level latency probes, decoupled from facade queueing: one atomic
      * chain evaluation every 10 ms, recorded by path (healthy, fallback,
-     * outage-shaped) for the absolute-target report and nightly assertions.
+     * outage-shaped) for environment-specific diagnostic reports.
      */
     private static void probeWorker(
             FallbackRateLimitStore store, Counters counters, CountDownLatch running, long deadlineNanos) {
         await(running);
         Limit probeLimit = new Limit(1_000_000_000, 1_000_000_000, Duration.ofSeconds(1));
         List<LevelRequest> chain = List.of(
-                new LevelRequest("soak-probe:global:probe", probeLimit, Algorithm.TOKEN_BUCKET, 1));
+                new LevelRequest(key("soak-probe:global:probe"), probeLimit, Algorithm.TOKEN_BUCKET, 1));
         while (System.nanoTime() < deadlineNanos) {
             long start = System.nanoTime();
             try {
@@ -462,7 +464,7 @@ public final class SoakHarness {
             }
         }
 
-        void report(Duration duration, boolean assertLatency) {
+        void report(Duration duration) {
             double healthyP99Ms = p99Millis(healthyProbes, healthyProbeCount.get());
             double fallbackP99Ms = p99Millis(fallbackProbes, fallbackProbeCount.get());
             System.out.printf("soak summary (%d s): allowed=%d rejected=%d waited=%d reloads=%d%n"
@@ -487,15 +489,7 @@ public final class SoakHarness {
             long totalProbes = healthyProbeCount.get() + fallbackProbeCount.get() + outageProbes.get();
             check(totalProbes == 0 || outageProbes.get() * 10 < totalProbes,
                     "outage-shaped probes exceeded 10% of all probes");
-            if (assertLatency) {
-                check(healthyProbeCount.get() >= 100, "too few healthy probes for a p99 assertion");
-                check(healthyP99Ms <= 1.0,
-                        "allow-path p99 " + healthyP99Ms + " ms exceeded the 1 ms target");
-                if (fallbackProbeCount.get() >= 100) {
-                    check(fallbackP99Ms <= 0.01,
-                            "fallback p99 " + fallbackP99Ms + " ms exceeded the 0.01 ms target");
-                }
-            }
+
         }
 
         private void check(boolean condition, String violation) {

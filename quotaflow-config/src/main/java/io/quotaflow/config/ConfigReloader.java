@@ -40,7 +40,7 @@ public final class ConfigReloader implements AutoCloseable {
     private final DefaultQuotaFlow quotaFlow;
     private final Duration pollInterval;
     private final List<Runnable> onApplied;
-    private final Object pipelineLock = new Object();
+    private final java.util.concurrent.locks.ReentrantLock pipelineLock = new java.util.concurrent.locks.ReentrantLock();
 
     private volatile Map<String, String> lastSeen;
     private ScheduledExecutorService scheduler;
@@ -117,23 +117,26 @@ public final class ConfigReloader implements AutoCloseable {
     }
 
     private ReloadResult apply(Map<String, String> payload) {
-        synchronized (pipelineLock) {
+        pipelineLock.lock();
+        try {
             lastSeen = payload;
             QuotaFlowConfiguration configuration;
             try {
                 configuration = ConfigurationParser.parse(payload);
+                quotaFlow.replacePolicySet(configuration.policySet());
             } catch (RuntimeException e) {
                 log.error("configuration reload rejected; serving policy set unchanged: {}",
                         e.getMessage());
                 return ReloadResult.rejected(e.getMessage());
             }
-            quotaFlow.replacePolicySet(configuration.policySet());
             for (Runnable hook : onApplied) {
                 hook.run();
             }
             log.info("configuration applied: {} policies swapped atomically",
                     configuration.policySet().size());
             return ReloadResult.applied(configuration.policySet().size());
+        } finally {
+            pipelineLock.unlock();
         }
     }
 

@@ -152,6 +152,7 @@ public class QuotaFlowAutoConfiguration {
             ObjectProvider<MeterRegistry> meterRegistry,
             ObjectProvider<LimitResolver> limitResolvers) {
         DefaultQuotaFlow.Builder builder = DefaultQuotaFlow.builder(configuration.policySet(), store)
+                .namespace(properties.getNamespace())
                 .maxWaitersPerPolicy(properties.getMaxWaitersPerPolicy())
                 .addResolver(KeyResolvers.PRINCIPAL_ID, KeyResolvers.principal())
                 .addResolver(KeyResolvers.TENANT_ID_ID, KeyResolvers.tenantId())

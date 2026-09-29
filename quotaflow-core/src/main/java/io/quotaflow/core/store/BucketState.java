@@ -10,7 +10,7 @@ import java.util.Objects;
  * remaining at snapshot time. Used to replay degraded-mode consumption into a
  * recovered distributed store via {@link StateSeeder}.
  */
-public record BucketState(String storageKey, Limit limit, Algorithm algorithm, long remaining) {
+public record BucketState(BucketIdentity storageKey, Limit limit, Algorithm algorithm, long remaining) {
 
     public BucketState {
         Objects.requireNonNull(storageKey, "storageKey");
