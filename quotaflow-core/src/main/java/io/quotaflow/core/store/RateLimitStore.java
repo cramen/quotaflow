@@ -17,7 +17,7 @@ public interface RateLimitStore {
 
     /**
      * Atomically validates/registers the complete candidate before policy publication.
-     * Implementations retain removed bindings and reject scope/domain reassignment.
+     * Implementations retain removed bindings and reject algorithm/scope/domain reassignment.
      * This is a control-plane operation, not an acquisition or a quota debit.
      */
     CompletionStage<Void> registerPolicies(List<PolicyBinding> bindings);
@@ -27,7 +27,7 @@ public interface RateLimitStore {
      * Atomically consumes {@code weight} tokens from the bucket identified by
      * {@code storageKey} if enough remain; consumes nothing otherwise.
      *
-     * @throws IllegalArgumentException if {@code weight} is less than 1
+     * @throws IllegalArgumentException if {@code weight} is outside the supported numeric envelope
      */
     StoreResult tryAcquire(BucketIdentity storageKey, Limit limit, Algorithm algorithm, long weight);
 

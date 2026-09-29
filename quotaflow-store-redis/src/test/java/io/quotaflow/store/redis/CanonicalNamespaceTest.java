@@ -81,16 +81,16 @@ class CanonicalNamespaceTest extends RedisContainerSupport {
         try (var connection = client().connect(); var first = newStore(connection); var second = newStore(connection)) {
             new RedisNamespaceAdmin(connection).provisionFresh("bounded", true, 2);
             var d = new QuotaDomain("bounded", "root");
-            var original = new PolicyBinding(d, "one", Scope.USER);
+            var original = new PolicyBinding(d, "one", Scope.USER, io.quotaflow.core.Algorithm.TOKEN_BUCKET);
             first.registerPolicies(List.of(original)).toCompletableFuture().join();
-            var extra = new PolicyBinding(d, "two", Scope.USER);
-            var conflict = new PolicyBinding(new QuotaDomain("bounded", "other"), "one", Scope.USER);
+            var extra = new PolicyBinding(d, "two", Scope.USER, io.quotaflow.core.Algorithm.TOKEN_BUCKET);
+            var conflict = new PolicyBinding(new QuotaDomain("bounded", "other"), "one", Scope.USER, io.quotaflow.core.Algorithm.TOKEN_BUCKET);
             assertInstanceOf(PolicyConfigurationException.class, failure(() -> second.registerPolicies(List.of(extra, conflict)).toCompletableFuture().join()));
             var keys = RedisKeyScheme.defaults();
             assertEquals("1", connection.sync().hget(keys.manifestKey("bounded"), "count"));
             assertNull(connection.sync().hget(keys.manifestKey("bounded"), "p:" + RedisKeyScheme.policyDigest("two")));
             assertInstanceOf(PolicyConfigurationException.class, failure(() -> first.registerPolicies(List.of(extra,
-                    new PolicyBinding(d, "three", Scope.USER))).toCompletableFuture().join()));
+                    new PolicyBinding(d, "three", Scope.USER, io.quotaflow.core.Algorithm.TOKEN_BUCKET))).toCompletableFuture().join()));
             assertEquals("1", connection.sync().hget(keys.manifestKey("bounded"), "count"));
             first.registerPolicies(List.of()).toCompletableFuture().join();
             assertInstanceOf(PolicyConfigurationException.class, failure(() -> second.registerPolicies(List.of(conflict)).toCompletableFuture().join()));
@@ -104,8 +104,8 @@ class CanonicalNamespaceTest extends RedisContainerSupport {
         try (var c1 = client().connect(); var c2 = client().connect(); var a = newStore(c1); var b = newStore(c2)) {
             new RedisNamespaceAdmin(c1).provisionFresh("race", true, 3);
             var d = new QuotaDomain("race", "root");
-            var one = a.registerPolicies(List.of(new PolicyBinding(d, "a1", Scope.USER), new PolicyBinding(d, "a2", Scope.USER))).toCompletableFuture();
-            var two = b.registerPolicies(List.of(new PolicyBinding(d, "b1", Scope.USER), new PolicyBinding(d, "b2", Scope.USER))).toCompletableFuture();
+            var one = a.registerPolicies(List.of(new PolicyBinding(d, "a1", Scope.USER, io.quotaflow.core.Algorithm.TOKEN_BUCKET), new PolicyBinding(d, "a2", Scope.USER, io.quotaflow.core.Algorithm.TOKEN_BUCKET))).toCompletableFuture();
+            var two = b.registerPolicies(List.of(new PolicyBinding(d, "b1", Scope.USER, io.quotaflow.core.Algorithm.TOKEN_BUCKET), new PolicyBinding(d, "b2", Scope.USER, io.quotaflow.core.Algorithm.TOKEN_BUCKET))).toCompletableFuture();
             int accepted = 0;
             for (var future : List.of(one, two)) {
                 try { future.join(); accepted++; }
@@ -126,7 +126,7 @@ class CanonicalNamespaceTest extends RedisContainerSupport {
             connection.sync().del(manifest);
             connection.sync().set(manifest, "wrong-type");
             assertInstanceOf(PolicyConfigurationException.class, failure(() -> store.registerPolicies(
-                    List.of(new PolicyBinding(DOMAIN, "provider", Scope.GLOBAL))).toCompletableFuture().join()));
+                    List.of(new PolicyBinding(DOMAIN, "provider", Scope.GLOBAL, io.quotaflow.core.Algorithm.TOKEN_BUCKET))).toCompletableFuture().join()));
         }
     }
 
@@ -200,7 +200,7 @@ class CanonicalNamespaceTest extends RedisContainerSupport {
             assertEquals(0L, connection.sync().exists(canonical));
             assertEquals(0L, connection.sync().exists(legacy));
             trace.add("complete fixture inventory naturally drained; no DEL or TTL shortening");
-            List<Object> result = connection.sync().eval(LuaScript.load("/lua/token_bucket.lua").source(),
+            List<Object> result = connection.sync().eval(LuaScript.load("/legacy-token-bucket.lua").source(),
                     io.lettuce.core.ScriptOutputType.MULTI, new String[] {legacy}, "1", "1", "500000", "1");
             assertEquals(1L, ((Number) result.get(0)).longValue());
             trace.add("legacy writer resumed after verified drain; layouts never admitted concurrently");

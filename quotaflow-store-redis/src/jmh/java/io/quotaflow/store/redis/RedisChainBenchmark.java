@@ -36,6 +36,8 @@ import org.testcontainers.utility.DockerImageName;
 @State(Scope.Benchmark)
 @Threads(8)
 public class RedisChainBenchmark {
+    @org.openjdk.jmh.annotations.Param({"TOKEN_BUCKET"})
+    public Algorithm algorithm;
 
     /** Decisions issued per throughput invocation; joined as one batch. */
     static final int BATCH = 256;
@@ -70,13 +72,13 @@ public class RedisChainBenchmark {
         twoLevelChains = new ArrayList<>(CHAIN_POOL);
         QuotaDomain domain = new QuotaDomain(namespace, "provider");
         BucketIdentity parent = new BucketIdentity(domain, "provider", io.quotaflow.core.Scope.GLOBAL, "shared");
-        store.registerPolicies(List.of(PolicyBinding.of(parent),
-                new PolicyBinding(domain, "tenant", io.quotaflow.core.Scope.TENANT))).toCompletableFuture().join();
+        store.registerPolicies(List.of(PolicyBinding.of(parent, algorithm),
+                new PolicyBinding(domain, "tenant", io.quotaflow.core.Scope.TENANT, algorithm))).toCompletableFuture().join();
         for (int i = 0; i < CHAIN_POOL; i++) {
             twoLevelChains.add(List.of(
-                    new LevelRequest(parent, limit, Algorithm.TOKEN_BUCKET, 1),
+                    new LevelRequest(parent, limit, algorithm, 1),
                     new LevelRequest(new BucketIdentity(domain, "tenant", io.quotaflow.core.Scope.TENANT,
-                            Integer.toString(i)), limit, Algorithm.TOKEN_BUCKET, 1)));
+                            Integer.toString(i)), limit, algorithm, 1)));
         }
     }
 

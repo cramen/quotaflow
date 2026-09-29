@@ -73,7 +73,9 @@ Distributed namespaces must be explicitly provisioned before activation. Configu
 `quotaflow.namespace` (or the core builder's `namespace`) consistently across the
 fleet. See [canonical quota state and migration](docs/canonical-quota-state.md)
 for fresh setup, the breaking store SPI migration, coordinated legacy cutover and
-rollback. A shared policy tree occupies one Redis Cluster slot; capacity planning
+rollback. See [numeric limits and state compatibility](docs/numeric-state.md)
+for supported rates, immutable algorithm bindings and the coordinated codec upgrade.
+A shared policy tree occupies one Redis Cluster slot; capacity planning
 must retain its shared ancestor rather than split it into per-user counters.
 
 ## Building

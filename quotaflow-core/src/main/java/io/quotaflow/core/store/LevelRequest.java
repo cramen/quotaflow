@@ -16,9 +16,7 @@ public record LevelRequest(BucketIdentity storageKey, Limit limit, Algorithm alg
         Objects.requireNonNull(storageKey, "storageKey");
         Objects.requireNonNull(limit, "limit");
         Objects.requireNonNull(algorithm, "algorithm");
-        if (weight < 1) {
-            throw new IllegalArgumentException("weight must be >= 1, got " + weight);
-        }
+        Limit.validateWeight(weight);
     }
     /** Validates an atomic batch before registration or any quota mutation. */
     public static void validateChain(List<LevelRequest> chain) {

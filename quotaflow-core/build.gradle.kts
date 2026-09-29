@@ -65,6 +65,7 @@ pitest {
 
 // JMH measurements are environment-specific; comparison requires an explicit matching baseline.
 jmh {
+    benchmarkParameters.put("algorithm", objects.listProperty(String::class.java).value(listOf(providers.gradleProperty("benchmarkAlgorithm").orElse("TOKEN_BUCKET").get())))
     fork = 1
     warmupIterations = 2
     iterations = 3

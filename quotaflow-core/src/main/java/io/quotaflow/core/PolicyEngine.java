@@ -92,7 +92,7 @@ public final class PolicyEngine {
     public CompletionStage<Void> registerPolicies(PolicySet policies) {
         return store.registerPolicies(policies.policies().stream().map(policy -> new PolicyBinding(
                 new QuotaDomain(namespace, policies.rootPolicyId(policy.id())),
-                policy.id(), policy.scope())).toList());
+                policy.id(), policy.scope(), policy.algorithm())).toList());
     }
 
     /**
@@ -116,6 +116,11 @@ public final class PolicyEngine {
 
     Evaluation evaluateInternal(PolicySet policies, String leafPolicyId, RateLimitContext context, long weight) {
         List<PendingLevel> levels = preflight(policies, leafPolicyId, context, weight);
+        for (PendingLevel level : levels) {
+            if (level.limit() != null && weight > level.limit().capacity()) {
+                return rejectedBeforeStore(level);
+            }
+        }
         if (store instanceof BatchRateLimitStore batchStore) {
             List<LevelRequest> requests = levelRequests(levels, weight);
             if (requests.isEmpty()) {
@@ -146,6 +151,11 @@ public final class PolicyEngine {
             levels = preflight(policies, leafPolicyId, context, weight);
         } catch (RuntimeException e) {
             return CompletableFuture.failedFuture(e);
+        }
+        for (PendingLevel level : levels) {
+            if (level.limit() != null && weight > level.limit().capacity()) {
+                return CompletableFuture.completedFuture(rejectedBeforeStore(level));
+            }
         }
         if (store instanceof BatchRateLimitStore batchStore) {
             List<LevelRequest> requests = levelRequests(levels, weight);
@@ -220,9 +230,7 @@ public final class PolicyEngine {
      * reaches the store.
      */
     private List<PendingLevel> preflight(PolicySet policies, String leafPolicyId, RateLimitContext context, long weight) {
-        if (weight < 1) {
-            throw new IllegalArgumentException("weight must be >= 1, got " + weight);
-        }
+        Limit.validateWeight(weight);
         Objects.requireNonNull(context, "context");
         List<RateLimitPolicy> chain = policies.chainFromLeaf(leafPolicyId);
         List<PendingLevel> levels = new ArrayList<>(chain.size());
@@ -288,6 +296,7 @@ public final class PolicyEngine {
     }
 
     private static Evaluation rejection(PendingLevel level, long remaining, long retryAfterMillis) {
+        if (retryAfterMillis == 0) return rejectedBeforeStore(level);
         Decision decision = Decision.rejected(
                 level.policy().id(),
                 level.policy().scope(),

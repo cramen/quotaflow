@@ -18,6 +18,9 @@
       },
       {
         "pattern": "\\Qlua/provision_namespace.lua\\E"
+      },
+      {
+        "pattern": "\\Qlua/numeric_state.lua\\E"
       }
     ]
   }

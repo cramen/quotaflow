@@ -14,15 +14,13 @@ import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 
-/**
- * Degradation-mode hot path: a single local-store decision. Gated absolutely
- * at p99 &le; 0.01 ms by the {@code benchmarkGate} task — the local path is
- * hardware-cheap enough that the absolute bound holds on any CI runner.
- */
+/** Bare local-store latency diagnostic; actual fallback is measured in the fallback module. */
 @BenchmarkMode(Mode.SampleTime)
 @OutputTimeUnit(TimeUnit.MILLISECONDS)
 @State(Scope.Benchmark)
 public class LocalFallbackBenchmark {
+    @org.openjdk.jmh.annotations.Param({"TOKEN_BUCKET"})
+    public Algorithm algorithm;
 
     private LocalRateLimitStore store;
     private Limit limit;
@@ -38,6 +36,6 @@ public class LocalFallbackBenchmark {
 
     @Benchmark
     public StoreResult tryAcquire() {
-        return store.tryAcquire(bucket, limit, Algorithm.TOKEN_BUCKET, 1);
+        return store.tryAcquire(bucket, limit, algorithm, 1);
     }
 }

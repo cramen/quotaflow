@@ -118,7 +118,7 @@ class ChainScriptTest extends RedisContainerSupport {
             assertFalse(rejected.acquired());
             assertEquals(0, rejected.firedLevelIndex());
             String leafKey = KEYS.chainKeys(chain.stream().map(LevelRequest::storageKey).toList()).get(1);
-            assertTrue(connection.sync().get(leafKey).startsWith("1:"),
+            assertTrue(connection.sync().get(leafKey).split(":")[3].equals("1"),
                     "leaf bucket must still hold its one remaining token");
         }
     }

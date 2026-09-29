@@ -16,8 +16,8 @@ unit and positive finite value, and write `build/reports/jmh/verification.json`
 alongside raw `results.json`. Without an explicit baseline they report regression
 `NOT ASSESSED`. A successful diagnostic task is not release performance
 certification. The core workload measures the bare local store, not the complete
-fallback wrapper. Actual fallback and repeated-run release certification remain
-work in `enforce-release-quality-gates`.
+fallback wrapper. The fallback module now supplies a separate actual wrapper/facade benchmark.
+Repeated-run release certification remains work in `enforce-release-quality-gates`.
 
 The verifier contract tests run with `python3 scripts/test_benchmark_verification.py`
 and synthetic evidence; they do not run JMH or require Docker.
@@ -70,7 +70,7 @@ A comparison requires exact profile and JMH configuration equality (runtime,
 parameters, threads, forks, warmups and measurement settings). Missing evidence,
 invalid values, mismatches or throughput decline/latency increase greater than
 10% fail. No task updates the baseline automatically. Use one module per command
-when supplying a baseline; core and Redis have different metrics.
+when supplying a baseline; core, fallback and Redis have different metrics.
 
 This check compares individual result sets. Release certification still needs
 at least three complete independent runs per version, variability analysis and
@@ -87,3 +87,7 @@ it does not create new measurements or prove they belong to a release candidate.
 Soak reports retain latency distributions while enforcing correctness/resource
 invariants. Absolute 1 ms / 0.01 ms assertions are removed; they cannot establish
 machine-independent quality.
+
+Both algorithms can be measured separately using `-PbenchmarkAlgorithm=TOKEN_BUCKET`
+or `-PbenchmarkAlgorithm=GCRA`. Run `:quotaflow-fallback:benchmarkGate` for the actual
+degraded wrapper/facade path; preserve each algorithm's JMH JSON separately.

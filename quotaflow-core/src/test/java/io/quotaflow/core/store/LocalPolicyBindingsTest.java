@@ -12,7 +12,7 @@ import org.junit.jupiter.api.Test;
 
 class LocalPolicyBindingsTest {
     private PolicyBinding binding(String policy, String root, Scope scope) {
-        return new PolicyBinding(new QuotaDomain("test", root), policy, scope);
+        return new PolicyBinding(new QuotaDomain("test", root), policy, scope, io.quotaflow.core.Algorithm.TOKEN_BUCKET);
     }
 
     @Test
@@ -36,7 +36,7 @@ class LocalPolicyBindingsTest {
         registry.register(List.of(binding("two", "root", Scope.USER)));
         assertEquals(2, registry.size("test"));
         assertEquals(0, registry.size("other"));
-        registry.register(List.of(new PolicyBinding(new QuotaDomain("other", "root"), "one", Scope.GLOBAL)));
+        registry.register(List.of(new PolicyBinding(new QuotaDomain("other", "root"), "one", Scope.GLOBAL, io.quotaflow.core.Algorithm.TOKEN_BUCKET)));
         assertEquals(1, registry.size("other"));
     }
 
@@ -84,9 +84,9 @@ class LocalPolicyBindingsTest {
     void invalidBindingsAndBudgetsFailEarly() {
         assertThrows(IllegalArgumentException.class, () -> new LocalPolicyBindings(0));
         assertThrows(NullPointerException.class, () -> new LocalPolicyBindings().register((List<PolicyBinding>) null));
-        assertThrows(NullPointerException.class, () -> new PolicyBinding(null, "p", Scope.GLOBAL));
-        assertThrows(NullPointerException.class, () -> new PolicyBinding(new QuotaDomain("n", "p"), "p", null));
-        assertThrows(IllegalArgumentException.class, () -> new PolicyBinding(new QuotaDomain("n", "p"), "", Scope.GLOBAL));
+        assertThrows(NullPointerException.class, () -> new PolicyBinding(null, "p", Scope.GLOBAL, io.quotaflow.core.Algorithm.TOKEN_BUCKET));
+        assertThrows(NullPointerException.class, () -> new PolicyBinding(new QuotaDomain("n", "p"), "p", null, io.quotaflow.core.Algorithm.TOKEN_BUCKET));
+        assertThrows(IllegalArgumentException.class, () -> new PolicyBinding(new QuotaDomain("n", "p"), "", Scope.GLOBAL, io.quotaflow.core.Algorithm.TOKEN_BUCKET));
         assertThrows(IllegalArgumentException.class, () -> DefaultQuotaFlow.builder(
                 PolicySet.compile(List.of(RateLimitPolicy.builder("p").scope(Scope.GLOBAL)
                         .limit(new Limit(1, 1, Duration.ofSeconds(1))).build())), new LocalRateLimitStore()).namespace(""));

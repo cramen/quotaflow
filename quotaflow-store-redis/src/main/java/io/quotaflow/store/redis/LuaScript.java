@@ -30,7 +30,12 @@ final class LuaScript {
         } catch (IOException e) {
             throw new UncheckedIOException("failed to read Lua script " + classpathResource, e);
         }
-        return new LuaScript(new String(bytes, StandardCharsets.UTF_8), sha1Hex(bytes));
+        String source = new String(bytes, StandardCharsets.UTF_8);
+        if (classpathResource.equals("/lua/token_bucket.lua") || classpathResource.equals("/lua/gcra.lua")
+                || classpathResource.equals("/lua/chain.lua") || classpathResource.equals("/lua/seed.lua")) {
+            source = load("/lua/numeric_state.lua").source() + "\n" + source;
+        }
+        return new LuaScript(source, sha1Hex(source.getBytes(StandardCharsets.UTF_8)));
     }
 
     String source() {

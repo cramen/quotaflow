@@ -213,6 +213,14 @@ class ClusterTopologyTckTest {
     }
 
     @Test
+    void numericContractOnCluster() {
+        try (var connection = clusterClient.connect();
+                var store = new RedisRateLimitStore(connection, RedisStoreConfig.defaults())) {
+            NumericConformance.verify(store);
+        }
+    }
+
+    @Test
     void sharedWeightedHierarchyAndDirectParentsOnCluster() throws Exception {
         try (var connection = clusterClient.connect(); var store = new RedisRateLimitStore(connection,
                 new RedisStoreConfig(Duration.ofSeconds(2), Duration.ofSeconds(4)))) {
@@ -310,7 +318,7 @@ class ClusterTopologyTckTest {
                 RedisRateLimitStore store = new RedisRateLimitStore(connection, RedisStoreConfig.defaults())) {
             Limit limit = new Limit(1, 1, Duration.ofSeconds(10));
             for (Algorithm algorithm : Algorithm.values()) {
-                String key = "cluster:user:" + algorithm.name().toLowerCase() + '-' + UUID.randomUUID();
+                String key = "cluster-" + algorithm.name().toLowerCase() + ":user:" + '-' + UUID.randomUUID();
                 StoreResult allowed = store.tryAcquire(key(key), limit, algorithm, 1);
                 assertTrue(allowed.acquired(), algorithm + " first acquisition");
                 assertFalse(store.tryAcquire(key(key), limit, algorithm, 1).acquired(),

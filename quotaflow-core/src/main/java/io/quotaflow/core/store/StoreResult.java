@@ -3,7 +3,8 @@ package io.quotaflow.core.store;
 /**
  * Outcome of one atomic store acquisition. On rejection
  * {@code retryAfterMillis} is the positive delay after which the same request
- * would be admitted; it is undefined (zero) when {@code acquired} is true.
+ * could fit after refill; zero on rejection means no refill schedule exists.
+ * It is also zero when {@code acquired} is true.
  */
 public record StoreResult(boolean acquired, long remaining, long retryAfterMillis) {
 

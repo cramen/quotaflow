@@ -1,5 +1,6 @@
 plugins {
     `java-library`
+    alias(libs.plugins.jmh)
 }
 
 java {
@@ -22,3 +23,17 @@ dependencies {
 tasks.withType<Test> {
     useJUnitPlatform()
 }
+
+jmh {
+    benchmarkParameters.put("algorithm", objects.listProperty(String::class.java).value(listOf(providers.gradleProperty("benchmarkAlgorithm").orElse("TOKEN_BUCKET").get())))
+    fork = 1
+    warmupIterations = 2
+    iterations = 3
+    resultFormat.set("JSON")
+    resultsFile.set(layout.buildDirectory.file("reports/jmh/results.json"))
+}
+extra["benchmarkMetrics"] = mapOf(
+    "fallbackLatencyP99Ms" to mapOf("benchmark" to "io.quotaflow.fallback.FallbackDecisionBenchmark.acquire",
+        "mode" to "sample", "unit" to "ms/op", "percentile" to "99.0")
+)
+apply(from = rootProject.file("gradle/benchmark-verification.gradle"))

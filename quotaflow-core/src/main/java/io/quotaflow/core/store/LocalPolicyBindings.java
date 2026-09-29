@@ -35,7 +35,7 @@ public final class LocalPolicyBindings {
             for (PolicyBinding binding : copy) {
                 PolicyBinding previous = next.putIfAbsent(key(binding), binding);
                 if (previous != null && !previous.equals(binding)) {
-                    throw new PolicyConfigurationException("policy scope or root domain conflicts with registered identity");
+                    throw new PolicyConfigurationException("policy algorithm, scope or root domain conflicts with registered identity");
                 }
                 if (previous == null && sizes.merge(binding.domain().namespace(), 1, Integer::sum) > maximum) {
                     throw new PolicyConfigurationException("policy registration budget is exhausted; identity history cannot be evicted");
@@ -47,8 +47,8 @@ public final class LocalPolicyBindings {
         }
     }
 
-    public void register(BucketIdentity bucket) {
-        PolicyBinding binding = PolicyBinding.of(bucket);
+    public void register(BucketIdentity bucket, io.quotaflow.core.Algorithm algorithm) {
+        PolicyBinding binding = PolicyBinding.of(bucket, algorithm);
         if (!binding.equals(bindings.get(key(binding)))) register(List.of(binding));
     }
 

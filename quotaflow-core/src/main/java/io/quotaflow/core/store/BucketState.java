@@ -16,8 +16,8 @@ public record BucketState(BucketIdentity storageKey, Limit limit, Algorithm algo
         Objects.requireNonNull(storageKey, "storageKey");
         Objects.requireNonNull(limit, "limit");
         Objects.requireNonNull(algorithm, "algorithm");
-        if (remaining < 0) {
-            throw new IllegalArgumentException("remaining must be >= 0, got " + remaining);
+        if (remaining < 0 || remaining > limit.capacity()) {
+            throw new IllegalArgumentException("remaining must be within target capacity, got " + remaining);
         }
     }
 }

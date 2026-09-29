@@ -39,11 +39,11 @@ class MetricCardinalityTckTest {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         PolicySet policies = PolicySet.compile(List.of(
                 RateLimitPolicy.builder("global")
-                        .limit(new Limit(100_000_000, 100_000_000, Duration.ofMinutes(1)))
+                        .limit(new Limit(100_000_000, 1_000_000, Duration.ofMinutes(1)))
                         .scope(Scope.GLOBAL)
                         .build(),
                 RateLimitPolicy.builder("per-tenant")
-                        .limit(new Limit(100_000_000, 100_000_000, Duration.ofMinutes(1)))
+                        .limit(new Limit(100_000_000, 1_000_000, Duration.ofMinutes(1)))
                         .scope(Scope.TENANT)
                         .parentId("global")
                         .build(),

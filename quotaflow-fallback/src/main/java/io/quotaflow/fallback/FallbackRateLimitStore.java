@@ -14,6 +14,7 @@ import io.quotaflow.core.store.LevelRequest;
 import io.quotaflow.core.store.LocalRateLimitStore;
 import io.quotaflow.core.store.StateSeeder;
 import io.quotaflow.core.store.StoreResult;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -163,10 +164,8 @@ public final class FallbackRateLimitStore implements BatchRateLimitStore {
         Objects.requireNonNull(storageKey, "storageKey");
         Objects.requireNonNull(limit, "limit");
         Objects.requireNonNull(algorithm, "algorithm");
-        if (weight < 1) {
-            throw new IllegalArgumentException("weight must be >= 1, got " + weight);
-        }
-        List<PolicyBinding> binding = List.of(PolicyBinding.of(storageKey));
+        Limit.validateWeight(weight);
+        List<PolicyBinding> binding = List.of(PolicyBinding.of(storageKey, algorithm));
         if (!registered(binding)) activate(binding).toCompletableFuture().join();
         CircuitBreaker.Call call = breaker.permitCall();
         if (call == CircuitBreaker.Call.LOCAL) {
@@ -191,10 +190,8 @@ public final class FallbackRateLimitStore implements BatchRateLimitStore {
         Objects.requireNonNull(storageKey, "storageKey");
         Objects.requireNonNull(limit, "limit");
         Objects.requireNonNull(algorithm, "algorithm");
-        if (weight < 1) {
-            throw new IllegalArgumentException("weight must be >= 1, got " + weight);
-        }
-        List<PolicyBinding> binding = List.of(PolicyBinding.of(storageKey));
+        Limit.validateWeight(weight);
+        List<PolicyBinding> binding = List.of(PolicyBinding.of(storageKey, algorithm));
         if (!registered(binding)) return activate(binding)
                 .thenCompose(ignored -> tryAcquireAsync(storageKey, limit, algorithm, weight));
         CircuitBreaker.Call call = breaker.permitCall();
@@ -228,7 +225,7 @@ public final class FallbackRateLimitStore implements BatchRateLimitStore {
     @Override
     public CompletionStage<ChainResult> tryAcquireAll(List<LevelRequest> chain) {
         LevelRequest.validateChain(chain);
-        List<PolicyBinding> bindings = chain.stream().map(level -> PolicyBinding.of(level.storageKey())).toList();
+        List<PolicyBinding> bindings = chain.stream().map(level -> PolicyBinding.of(level.storageKey(), level.algorithm())).toList();
         if (!registered(bindings)) return activate(bindings).thenCompose(ignored -> tryAcquireAll(chain));
         CircuitBreaker.Call call = breaker.permitCall();
         if (call == CircuitBreaker.Call.LOCAL) {
@@ -366,11 +363,17 @@ public final class FallbackRateLimitStore implements BatchRateLimitStore {
     }
 
     private ChainResult serveLocally(List<LevelRequest> chain) {
-        track(chain);
         List<LevelRequest> scaled = new ArrayList<>(chain.size());
-        for (LevelRequest level : chain) {
-            scaled.add(scale(level));
+        for (int i = 0; i < chain.size(); i++) {
+            LevelRequest level = chain.get(i);
+            Limit share = scale(level.limit(), level.algorithm());
+            if (share == null) {
+                notifyFallbackDecision(level.storageKey(), false);
+                return ChainResult.rejected(i, 0, 0);
+            }
+            scaled.add(new LevelRequest(level.storageKey(), share, level.algorithm(), level.weight()));
         }
+        track(chain);
         ChainResult result = local.tryAcquireAll(scaled).toCompletableFuture().join();
         LevelRequest fired = chain.get(result.firedLevelIndex());
         notifyFallbackDecision(fired.storageKey(), result.acquired());
@@ -378,6 +381,11 @@ public final class FallbackRateLimitStore implements BatchRateLimitStore {
     }
 
     private StoreResult serveLocally(BucketIdentity storageKey, Limit limit, Algorithm algorithm, long weight) {
+        Limit share = scale(limit, algorithm);
+        if (share == null) {
+            notifyFallbackDecision(storageKey, false);
+            return StoreResult.rejected(0, 0);
+        }
         if (trackedEntries.get() < config.maxSeedEntries()
                 && trackedDomains
                         .computeIfAbsent(storageKey.domain(), key -> new ConcurrentHashMap<>())
@@ -385,7 +393,7 @@ public final class FallbackRateLimitStore implements BatchRateLimitStore {
                         == null) {
             trackedEntries.incrementAndGet();
         }
-        StoreResult result = local.tryAcquire(storageKey, scale(limit, algorithm), algorithm, weight);
+        StoreResult result = local.tryAcquire(storageKey, share, algorithm, weight);
         notifyFallbackDecision(storageKey, result.acquired());
         return result;
     }
@@ -414,24 +422,24 @@ public final class FallbackRateLimitStore implements BatchRateLimitStore {
         }
     }
 
-    private LevelRequest scale(LevelRequest level) {
-        return new LevelRequest(level.storageKey(),
-                scale(level.limit(), level.algorithm()), level.algorithm(), level.weight());
-    }
-
+    /** Unrepresentable derived shares grant no credit; never round them up. */
     private Limit scale(Limit limit, Algorithm algorithm) {
         int instances = config.expectedInstances();
-        if (instances == 1) {
-            return limit;
+        if (instances == 1) return limit;
+        try {
+            return switch (algorithm) {
+                case TOKEN_BUCKET -> {
+                    long interval = limit.emissionIntervalNanos();
+                    if (interval > Limit.MAX_HORIZON_NANOS / instances) yield null;
+                    yield new Limit(limit.capacity() / instances, 1,
+                            Duration.ofNanos(interval * instances));
+                }
+                case GCRA -> new Limit(limit.capacity(), limit.refillAmount(),
+                        limit.refillPeriod().multipliedBy(instances));
+            };
+        } catch (IllegalArgumentException invalidShare) {
+            return null;
         }
-        return switch (algorithm) {
-            case TOKEN_BUCKET -> new Limit(
-                    Math.max(1, limit.capacity() / instances),
-                    Math.max(1, limit.refillAmount() / instances),
-                    limit.refillPeriod());
-            case GCRA -> new Limit(
-                    limit.capacity(), limit.refillAmount(), limit.refillPeriod().multipliedBy(instances));
-        };
     }
 
     private void onTransition(DegradationState from, DegradationState to, String reason) {

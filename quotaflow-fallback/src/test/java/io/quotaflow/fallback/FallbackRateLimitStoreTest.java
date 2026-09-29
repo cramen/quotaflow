@@ -205,7 +205,7 @@ class FallbackRateLimitStoreTest {
     }
 
     @Test
-    void tokenBucketScalingDividesCapacityAndRefillWithFloors() {
+    void tokenBucketScalingRetainsFractionalRateWithoutRoundingUpZeroBurst() {
         FallbackRateLimitStore store = newStore(4, 100);
         trip(store);
         // capacity 8 / 4 = 2, refill 8 / 4 = 2 per second -> 500 ms per token
@@ -222,13 +222,13 @@ class FallbackRateLimitStoreTest {
         assertEquals(0, rejected.firedLevelIndex());
         assertEquals(500, rejected.retryAfterMillis());
 
-        // floors: capacity 3 / 4 -> 1, refill 2 / 4 -> 1
+        // A zero derived burst cannot be rounded upward into a positive limit.
         Limit tiny = new Limit(3, 2, Duration.ofSeconds(1));
         List<LevelRequest> tinyChain = chain("p:tenant:other", tiny);
-        assertTrue(join(store, tinyChain).acquired());
+        assertFalse(join(store, tinyChain).acquired());
         ChainResult tinyRejected = join(store, tinyChain);
         assertFalse(tinyRejected.acquired());
-        assertEquals(1000, tinyRejected.retryAfterMillis());
+        assertEquals(0, tinyRejected.retryAfterMillis());
     }
 
     @Test

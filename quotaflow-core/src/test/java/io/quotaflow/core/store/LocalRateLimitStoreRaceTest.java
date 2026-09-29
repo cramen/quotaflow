@@ -23,8 +23,8 @@ class LocalRateLimitStoreRaceTest {
     private static final int ATTEMPTS_PER_THREAD = 2_000;
     private static final long CAPACITY = 10_000;
 
-    /** One token per hour: no refill during the test, so exactly CAPACITY acquisitions may succeed. */
-    private static final Limit LIMIT = new Limit(CAPACITY, 1, Duration.ofHours(1));
+    /** One token per minute: no refill during the test, so exactly CAPACITY acquisitions may succeed. */
+    private static final Limit LIMIT = new Limit(CAPACITY, 1, Duration.ofMinutes(1));
 
     @Test
     void tokenBucketNeverOverAdmitsUnderContention() throws Exception {

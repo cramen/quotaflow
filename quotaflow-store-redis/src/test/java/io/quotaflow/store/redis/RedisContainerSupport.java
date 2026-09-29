@@ -18,7 +18,7 @@ import org.testcontainers.utility.DockerImageName;
 abstract class RedisContainerSupport {
 
     protected static final GenericContainer<?> REDIS =
-            new GenericContainer<>(DockerImageName.parse("redis:6.2-alpine")).withExposedPorts(6379);
+            new GenericContainer<>(DockerImageName.parse(System.getProperty("quotaflow.test.redis.image", "redis:6.2.24-alpine"))).withExposedPorts(6379);
 
     private static RedisClient client;
 

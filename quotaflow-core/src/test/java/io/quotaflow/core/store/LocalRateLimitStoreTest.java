@@ -80,7 +80,7 @@ class LocalRateLimitStoreTest {
     void weightAboveCapacityIsNeverAdmitted() {
         StoreResult rejected = store.tryAcquire(key("k"), LIMIT, Algorithm.TOKEN_BUCKET, 6);
         assertFalse(rejected.acquired());
-        assertTrue(rejected.retryAfterMillis() > 0);
+        assertEquals(0, rejected.retryAfterMillis());
         nanos.addAndGet(60_000 * MILLI);
         assertFalse(store.tryAcquire(key("k"), LIMIT, Algorithm.TOKEN_BUCKET, 6).acquired());
     }
@@ -129,11 +129,11 @@ class LocalRateLimitStoreTest {
     }
 
     @Test
-    void algorithmsDoNotShareStateForSameKey() {
+    void algorithmSwitchCannotResetSpentState() {
         drain("k", 5, Algorithm.TOKEN_BUCKET);
-        StoreResult result = store.tryAcquire(key("k"), LIMIT, Algorithm.GCRA, 1);
-        assertTrue(result.acquired());
-        assertEquals(4, result.remaining());
+        assertThrows(io.quotaflow.core.PolicyConfigurationException.class,
+                () -> store.tryAcquire(key("k"), LIMIT, Algorithm.GCRA, 1));
+        assertFalse(store.tryAcquire(key("k"), LIMIT, Algorithm.TOKEN_BUCKET, 1).acquired());
     }
 
     @Test

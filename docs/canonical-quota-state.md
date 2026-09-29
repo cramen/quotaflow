@@ -35,7 +35,7 @@ Replace string store keys with explicit values:
 ```java
 QuotaDomain domain = new QuotaDomain("orders", "provider");
 BucketIdentity tenant = new BucketIdentity(domain, "tenant", Scope.TENANT, "acme");
-store.registerPolicies(List.of(PolicyBinding.of(tenant))).toCompletableFuture().join();
+store.registerPolicies(List.of(PolicyBinding.of(tenant, Algorithm.TOKEN_BUCKET))).toCompletableFuture().join();
 store.tryAcquire(tenant, limit, Algorithm.TOKEN_BUCKET, 1);
 ```
 
@@ -48,7 +48,7 @@ redacts the raw key, but the accessor is intentionally available to store code.
 
 Custom stores implement `registerPolicies(List<PolicyBinding>)` in addition to
 acquisition. Validate the complete candidate before policy publication, retain
-removed-policy bindings, and reject scope/root reassignment and registration
+removed-policy bindings, and reject algorithm/scope/root reassignment and registration
 budget overflow as `PolicyConfigurationException`. Distributed implementations
 must perform compare/register atomically in their authoritative backend. A local
 store can use `LocalPolicyBindings`. The compilable delegate example is

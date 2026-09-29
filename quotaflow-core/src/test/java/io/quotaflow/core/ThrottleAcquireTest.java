@@ -66,6 +66,23 @@ class ThrottleAcquireTest {
     }
 
     @Test
+    void impossibleWeightNeverEntersThrottleQueueOrChargesAncestors() {
+        LocalRateLimitStore store = new LocalRateLimitStore(() -> 0);
+        RateLimitPolicy parent = rejectPolicy("parent", 10, 1, Duration.ofSeconds(1));
+        RateLimitPolicy child = RateLimitPolicy.builder("child").parentId("parent")
+                .scope(Scope.USER).defaultKey("any").limit(new Limit(1, 1, Duration.ofSeconds(1)))
+                .reaction(Reaction.THROTTLE).build();
+        DefaultQuotaFlow flow = DefaultQuotaFlow.builder(PolicySet.compile(List.of(parent, child)), store).build();
+        Decision result = flow.acquireAsync("child", RateLimitContext.empty(), 2, Duration.ofSeconds(30))
+                .toCompletableFuture().join();
+        assertFalse(result.isAllowed());
+        assertTrue(result.retryAfter().isEmpty());
+        assertEquals(Duration.ZERO, result.waitDuration());
+        assertEquals(0, flow.waitQueueDepth("child"));
+        assertTrue(flow.tryAcquire("parent", RateLimitContext.empty(), 10).isAllowed());
+    }
+
+    @Test
     void instantAllowCarriesZeroWait() {
         DefaultQuotaFlow flow = flowFor(throttlePolicy("t", 5, 1, Duration.ofSeconds(1)));
         Decision decision = flow.acquire("t", RateLimitContext.empty(), 1, Duration.ofSeconds(1));

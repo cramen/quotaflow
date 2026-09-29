@@ -29,9 +29,9 @@ final class HierarchyConformance {
             Limit userLimit = new Limit(7, 1, Duration.ofHours(1));
             String tenantPolicy = root + "-tenant";
             String userPolicy = root + "-user";
-            store.registerPolicies(List.of(PolicyBinding.of(parent),
-                    new PolicyBinding(domain, tenantPolicy, Scope.TENANT),
-                    new PolicyBinding(domain, userPolicy, Scope.USER))).toCompletableFuture().join();
+            store.registerPolicies(List.of(PolicyBinding.of(parent, algorithm),
+                    new PolicyBinding(domain, tenantPolicy, Scope.TENANT, algorithm),
+                    new PolicyBinding(domain, userPolicy, Scope.USER, algorithm))).toCompletableFuture().join();
             AtomicLong total = new AtomicLong();
             AtomicLongArray tenants = new AtomicLongArray(4);
             AtomicLongArray users = new AtomicLongArray(32);

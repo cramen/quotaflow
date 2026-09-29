@@ -46,7 +46,7 @@ class DynamicConfigReloadTckTest {
 
     /** Old set: user scope, effectively unlimited (never rejects in-test). */
     private static Map<String, String> relaxedPayload() {
-        return payload("relaxed", 100_000_000, 100_000_000, "PT1S");
+        return payload("relaxed", 100_000_000, 1_000_000, "PT1S");
     }
 
     /** New set: same user policy identity, new resolver key and capacity one. */

@@ -110,8 +110,8 @@ class RedisLocalParityTest extends RedisContainerSupport {
                     }
                     String[] args = {
                         Long.toString(LIMIT.capacity()),
-                        Long.toString(LIMIT.refillAmount()),
-                        Long.toString(LIMIT.refillPeriod().toNanos() / 1_000),
+                        Long.toString(LIMIT.emissionIntervalNanos()),
+                        ParameterFingerprint.of(algorithm, LIMIT),
                         Long.toString(step.weight())
                     };
                     ServerCall call = timeThenEval(connection, script, keys, args);

@@ -35,7 +35,7 @@ class WeightedAcquisitionTckTest extends TckContainers {
     }
 
     private void weighted(String uri, Algorithm algorithm) throws Exception {
-        String key = uniqueKey("weighted:global:" + algorithm.name().toLowerCase());
+        String key = uniqueKey("weighted-" + algorithm.name().toLowerCase() + ":global:key");
         Limit limit = new Limit(10, 1, Duration.ofSeconds(1));
         RedisClient client = newClient(uri);
         try (RedisRateLimitStore store = RedisRateLimitStore.create(client, RedisStoreConfig.defaults())) {

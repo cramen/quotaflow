@@ -204,7 +204,7 @@ public final class SoakHarness {
     private static void probeWorker(
             FallbackRateLimitStore store, Counters counters, CountDownLatch running, long deadlineNanos) {
         await(running);
-        Limit probeLimit = new Limit(1_000_000_000, 1_000_000_000, Duration.ofSeconds(1));
+        Limit probeLimit = new Limit(1_000_000_000, 1_000_000, Duration.ofSeconds(1));
         List<LevelRequest> chain = List.of(
                 new LevelRequest(key("soak-probe:global:probe"), probeLimit, Algorithm.TOKEN_BUCKET, 1));
         while (System.nanoTime() < deadlineNanos) {

@@ -16,8 +16,9 @@ for _, field in ipairs(redis.call('HKEYS', KEYS[1])) do
         local value = redis.call('HGET', KEYS[1], field)
         local split = string.find(value, ':')
         local scope = split and string.sub(value, 1, split - 1)
-        local root = split and string.sub(value, split + 1)
+        local root, algorithm = string.match(value, '^[^:]+:([0-9a-f]+):([a-z]+)$')
         if #field ~= 66 or not string.match(string.sub(field, 3), '^[0-9a-f]+$')
+            or (algorithm ~= 'tb' and algorithm ~= 'gcra')
             or not root or #root ~= 64 or not string.match(root, '^[0-9a-f]+$')
             or (scope ~= 'global' and scope ~= 'tenant' and scope ~= 'user' and scope ~= 'key') then return {-4} end
         actual = actual + 1
