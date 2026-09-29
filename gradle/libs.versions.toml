@@ -41,3 +41,5 @@ kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
 jmh = { id = "me.champeau.jmh", version = "0.7.3" }
 graalvm-native = { id = "org.graalvm.buildtools.native", version = "1.1.14" }
 pitest = { id = "info.solidsoft.pitest", version = "1.19.0" }
+vanniktech-maven-publish = { id = "com.vanniktech.maven.publish", version = "0.37.0" }
+cyclonedx-bom = { id = "org.cyclonedx.bom", version = "3.4.1" }
