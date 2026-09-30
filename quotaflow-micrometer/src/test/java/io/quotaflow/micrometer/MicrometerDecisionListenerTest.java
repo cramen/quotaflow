@@ -37,12 +37,18 @@ class MicrometerDecisionListenerTest {
                 .build();
 
         flow.tryAcquire("per-tenant", tenant("acme"));
+        flow.flushObservations().toCompletableFuture().orTimeout(2, java.util.concurrent.TimeUnit.SECONDS).join();
         flow.tryAcquire("per-tenant", tenant("acme"));
+        flow.flushObservations().toCompletableFuture().orTimeout(2, java.util.concurrent.TimeUnit.SECONDS).join();
         flow.tryAcquire("per-tenant", tenant("globex"));
+        flow.flushObservations().toCompletableFuture().orTimeout(2, java.util.concurrent.TimeUnit.SECONDS).join();
         // drain the remaining tokens of acme, then reject
         flow.tryAcquire("per-tenant", tenant("acme"));
+        flow.flushObservations().toCompletableFuture().orTimeout(2, java.util.concurrent.TimeUnit.SECONDS).join();
         flow.tryAcquire("per-tenant", tenant("acme"));
+        flow.flushObservations().toCompletableFuture().orTimeout(2, java.util.concurrent.TimeUnit.SECONDS).join();
         flow.tryAcquire("per-tenant", tenant("acme"));
+        flow.flushObservations().toCompletableFuture().orTimeout(2, java.util.concurrent.TimeUnit.SECONDS).join();
 
         Counter allowed = registry.get(QuotaFlowMetrics.DECISIONS)
                 .tags("result", "allow", "policy", "per-tenant", "key-group", "tenant")
@@ -67,11 +73,15 @@ class MicrometerDecisionListenerTest {
                 .build();
 
         flow.tryAcquire("per-tenant", tenant("acme"));
+        flow.flushObservations().toCompletableFuture().orTimeout(2, java.util.concurrent.TimeUnit.SECONDS).join();
         assertEquals(0.25, utilization(registry), 1e-9);
         flow.tryAcquire("per-tenant", tenant("acme"));
+        flow.flushObservations().toCompletableFuture().orTimeout(2, java.util.concurrent.TimeUnit.SECONDS).join();
         assertEquals(0.5, utilization(registry), 1e-9);
         flow.tryAcquire("per-tenant", tenant("acme"));
+        flow.flushObservations().toCompletableFuture().orTimeout(2, java.util.concurrent.TimeUnit.SECONDS).join();
         flow.tryAcquire("per-tenant", tenant("acme"));
+        flow.flushObservations().toCompletableFuture().orTimeout(2, java.util.concurrent.TimeUnit.SECONDS).join();
 
         // fully consumed but not yet rejecting: the gauge reads 1 while the
         // reject counter has not moved
@@ -79,6 +89,7 @@ class MicrometerDecisionListenerTest {
         assertNull(registry.find(QuotaFlowMetrics.DECISIONS).tags("result", "reject").counter());
 
         flow.tryAcquire("per-tenant", tenant("acme"));
+        flow.flushObservations().toCompletableFuture().orTimeout(2, java.util.concurrent.TimeUnit.SECONDS).join();
         assertEquals(1.0, registry.get(QuotaFlowMetrics.DECISIONS)
                 .tags("result", "reject").counter().count());
     }
@@ -99,9 +110,10 @@ class MicrometerDecisionListenerTest {
                 .build();
 
         flow.tryAcquire("dynamic", tenant("acme"));
+        flow.flushObservations().toCompletableFuture().orTimeout(2, java.util.concurrent.TimeUnit.SECONDS).join();
 
         assertEquals(0.1, registry.get(QuotaFlowMetrics.UTILIZATION)
-                .tags("policy", "dynamic", "key-group", "tenant").gauge().value(), 1e-9);
+                .tags("policy", "dynamic").gauge().value(), 1e-9);
     }
 
     @Test
@@ -120,6 +132,7 @@ class MicrometerDecisionListenerTest {
                 .build();
 
         flow.tryAcquire("dynamic", tenant("acme"));
+        flow.flushObservations().toCompletableFuture().orTimeout(2, java.util.concurrent.TimeUnit.SECONDS).join();
 
         assertEquals(1.0, registry.get(QuotaFlowMetrics.DECISIONS)
                 .tags("result", "reject", "policy", "dynamic", "key-group", "tenant").counter().count());
@@ -128,7 +141,7 @@ class MicrometerDecisionListenerTest {
 
     private static double utilization(SimpleMeterRegistry registry) {
         return registry.get(QuotaFlowMetrics.UTILIZATION)
-                .tags("policy", "per-tenant", "key-group", "tenant")
+                .tags("policy", "per-tenant")
                 .gauge()
                 .value();
     }
@@ -155,6 +168,7 @@ class MicrometerDecisionListenerTest {
         current.set(tightened);
 
         flow.tryAcquire("per-tenant", tenant("acme"));
+        flow.flushObservations().toCompletableFuture().orTimeout(2, java.util.concurrent.TimeUnit.SECONDS).join();
 
         // remaining 9 against the new capacity 10, not the old capacity 100
         assertEquals(0.1, utilization(registry), 1e-9);

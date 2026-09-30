@@ -142,4 +142,25 @@ class ChainScriptTest extends RedisContainerSupport {
                     "retryAfter was " + rejected.retryAfterMillis());
         }
     }
+
+    @Test
+    void effectiveBudgetsRemainPairedWithTheirLevelForBothAlgorithms() {
+        for (Algorithm algorithm : Algorithm.values()) {
+            String run = UUID.randomUUID().toString();
+            var requests = List.of(
+                    new LevelRequest(key("parent-" + run + ":global:global"), new Limit(2, 1, Duration.ofHours(1)), algorithm, 1),
+                    new LevelRequest(key("leaf-" + run + ":user:fixture"), new Limit(10, 1, Duration.ofHours(1)), algorithm, 1));
+            try (var connection = client().connect(); var store = newStore(connection)) {
+                var first = store.tryAcquireAll(requests).toCompletableFuture().join();
+                assertEquals(List.of(
+                        new io.quotaflow.core.store.LevelBudget(0, new io.quotaflow.core.store.StoreBudget(2, 1, false)),
+                        new io.quotaflow.core.store.LevelBudget(1, new io.quotaflow.core.store.StoreBudget(10, 9, false))), first.budgets());
+                store.tryAcquireAll(requests).toCompletableFuture().join();
+                var denied = store.tryAcquireAll(requests).toCompletableFuture().join();
+                assertFalse(denied.acquired());
+                assertEquals(0, denied.budgets().get(0).budget().remaining());
+                assertEquals(8, denied.budgets().get(1).budget().remaining());
+            }
+        }
+    }
 }

@@ -104,3 +104,50 @@ SLAs (critical 7 days, high 30 days), and the support policy.
 ## License
 
 [Apache License 2.0](LICENSE)
+
+### Observation and logging contracts
+
+`quotaflow.decisions{result=wait,policy,key-group}` counts initial queue entries,
+not completed requests. Retries do not add entries; cancellation preserves the
+entry but emits no terminal decision. Wait entries and queue depth belong to the
+requested leaf; terminal counters identify the fired level. Traffic and rejection
+ratio queries must use only `result=allow|reject` in their denominator.
+
+`quotaflow.tokens.remaining{policy}` is the minimum latest observed remaining
+budget across bounded key-groups; `quotaflow.utilization{policy}` is the maximum
+paired utilization. Migrate old utilization queries by removing `key-group`.
+These gauges are sampled summaries, not live balances or fleet totals. Fallback
+samples describe effective local shares. Unknown budgets have no gauge; known
+zero capacity has utilization one. Idle samples retain their last observed value.
+Configuration changes invalidate old samples without removing another limiter's
+meters in a shared registry.
+
+Listener delivery is asynchronous, ordered per listener and bounded. A throwing
+listener does not affect quota outcomes or other listeners. Saturation or callback
+timeout disables that listener's delivery lane and records a safe diagnostic;
+`DefaultQuotaFlow.observationFailures()` must remain zero for complete observation
+evidence. `flushObservations()` provides an asynchronous delivery barrier for
+checks and shutdown coordination. Close owned facades and metric adapters;
+manually wired throttle adapters need `sync()` after configuration reload.
+
+Omitted `@RateLimited` USER keys use authenticated, non-anonymous identity.
+Reactive identity is resolved independently for each subscription. An explicit
+key expression is authoritative, including null results; shared default keys
+require explicit `USE_DEFAULT_KEY`. GLOBAL policies need no identity.
+
+Quotaflow sanitizes its own diagnostics at every log level and its outward
+startup/configuration exception chains. Applications must disable independent
+Redis wire/protocol payload logs: Lettuce TRACE can print HELLO/AUTH credentials
+even with sanitized URI rendering. For Spring Boot, explicitly configure:
+
+```yaml
+logging:
+  level:
+    io.lettuce.core.protocol: INFO
+```
+
+Keep this override when enabling DEBUG or TRACE on the root logger. Do not install
+transport byte-dump handlers; apply equivalent restrictions to caller-managed
+clients and other drivers. The application owns these settings, including runtime
+changes. Quotaflow does not change global logging configuration, and its redaction
+guarantee does not cover independently emitted third-party wire dumps.

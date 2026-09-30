@@ -51,8 +51,11 @@ record RateLimitProblem(URI type, String title, int status, String detail, Optio
         if (decision.retryAfter().isEmpty()) {
             return OptionalLong.empty();
         }
-        long nanos = decision.retryAfter().orElseThrow().toNanos();
-        return OptionalLong.of(Math.max(1, (nanos + 999_999_999L) / 1_000_000_000L));
+        var duration = decision.retryAfter().orElseThrow();
+        if (duration.isNegative() || duration.isZero()) return OptionalLong.empty();
+        long seconds = duration.getSeconds();
+        if (duration.getNano() == 0) return OptionalLong.of(seconds);
+        return seconds == Long.MAX_VALUE ? OptionalLong.empty() : OptionalLong.of(seconds + 1);
     }
 
     /** Minimal RFC 7807 JSON serialization with full string escaping. */

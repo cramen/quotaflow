@@ -1,8 +1,11 @@
 {
   "uid": "quotaflow-overview",
   "title": "Quotaflow Overview",
-  "description": "Reference dashboard for the Quotaflow metric contract. Expressions use Prometheus naming as emitted by the Micrometer Prometheus registry (quotaflow.decisions -> quotaflow_decisions_total).",
-  "tags": ["quotaflow", "rate-limiting"],
+  "description": "Reference dashboard for the Quotaflow metric contract. Expressions use Prometheus naming as emitted by the Micrometer Prometheus registry (quotaflow.decisions -> quotaflow_decisions_total). Wait counts queue entries, independently of terminal allow/reject decisions.",
+  "tags": [
+    "quotaflow",
+    "rate-limiting"
+  ],
   "timezone": "browser",
   "schemaVersion": 39,
   "version": 1,
@@ -17,7 +20,9 @@
       {
         "name": "policy",
         "type": "query",
-        "datasource": {"type": "prometheus"},
+        "datasource": {
+          "type": "prometheus"
+        },
         "query": "label_values(quotaflow_decisions_total, policy)",
         "includeAll": true,
         "multi": true,
@@ -31,7 +36,12 @@
       "type": "timeseries",
       "title": "Decisions by result",
       "description": "Decision rate split by allow/reject per policy and key-group.",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
       "targets": [
         {
           "refId": "A",
@@ -44,16 +54,25 @@
       "id": 2,
       "type": "timeseries",
       "title": "Utilization",
-      "description": "Last-known consumed capacity (0..1) per policy and key-group. Sustained values above 0.8 warn before rejections begin.",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "description": "Maximum utilization of latest bounded key-group samples per policy; degraded observations use local shares, not a global balance.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
       "fieldConfig": {
-        "defaults": {"min": 0, "max": 1, "unit": "percentunit"}
+        "defaults": {
+          "min": 0,
+          "max": 1,
+          "unit": "percentunit"
+        }
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (policy, key_group) (quotaflow_utilization{policy=~\"$policy\"})",
-          "legendFormat": "{{policy}}/{{key_group}}"
+          "expr": "max by (policy) (quotaflow_utilization{policy=~\"$policy\"})",
+          "legendFormat": "{{policy}}"
         }
       ]
     },
@@ -62,12 +81,33 @@
       "type": "stat",
       "title": "Degraded",
       "description": "1 while the distributed store is degraded and decisions are served by the local fallback.",
-      "gridPos": {"h": 6, "w": 6, "x": 0, "y": 8},
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 8
+      },
       "fieldConfig": {
         "defaults": {
           "mappings": [
-            {"type": "value", "options": {"0": {"text": "HEALTHY", "color": "green"}}},
-            {"type": "value", "options": {"1": {"text": "DEGRADED", "color": "red"}}}
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "HEALTHY",
+                  "color": "green"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "DEGRADED",
+                  "color": "red"
+                }
+              }
+            }
           ]
         }
       },
@@ -83,7 +123,12 @@
       "type": "timeseries",
       "title": "Fallback decisions",
       "description": "Rate of decisions served by the local fallback while degraded.",
-      "gridPos": {"h": 6, "w": 9, "x": 6, "y": 8},
+      "gridPos": {
+        "h": 6,
+        "w": 9,
+        "x": 6,
+        "y": 8
+      },
       "targets": [
         {
           "refId": "A",
@@ -97,14 +142,23 @@
       "type": "timeseries",
       "title": "Reject ratio",
       "description": "Share of rejected decisions; growth at stable traffic indicates shrinking headroom.",
-      "gridPos": {"h": 6, "w": 9, "x": 15, "y": 8},
+      "gridPos": {
+        "h": 6,
+        "w": 9,
+        "x": 15,
+        "y": 8
+      },
       "fieldConfig": {
-        "defaults": {"min": 0, "max": 1, "unit": "percentunit"}
+        "defaults": {
+          "min": 0,
+          "max": 1,
+          "unit": "percentunit"
+        }
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(quotaflow_decisions_total{result=\"reject\"}[5m])) / sum(rate(quotaflow_decisions_total[5m]))",
+          "expr": "sum(rate(quotaflow_decisions_total{result=\"reject\"}[5m])) / sum(rate(quotaflow_decisions_total{result=~\"allow|reject\"}[5m]))",
           "legendFormat": "reject ratio"
         }
       ]
@@ -113,10 +167,18 @@
       "id": 6,
       "type": "timeseries",
       "title": "Throttle wait duration",
-      "description": "Average time callers spend queued by throttle policies per policy and key-group (zero-wait decisions included).",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 14},
+      "description": "Terminal acquisition duration from API entry for queued or timed-out calls, including pre-queue delay; immediate decisions include zero waits.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
       "fieldConfig": {
-        "defaults": {"min": 0, "unit": "s"}
+        "defaults": {
+          "min": 0,
+          "unit": "s"
+        }
       },
       "targets": [
         {
@@ -131,9 +193,16 @@
       "type": "timeseries",
       "title": "Throttle queue depth",
       "description": "Waiters currently queued per throttle policy.",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 14},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
       "fieldConfig": {
-        "defaults": {"min": 0}
+        "defaults": {
+          "min": 0
+        }
       },
       "targets": [
         {
@@ -148,12 +217,42 @@
       "type": "timeseries",
       "title": "Throttle wait timeouts",
       "description": "Rate of waiters rejected because their wait timeout expired before they were served.",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 22},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      },
       "targets": [
         {
           "refId": "A",
           "expr": "sum by (policy, key_group) (rate(quotaflow_wait_timeouts_total{policy=~\"$policy\"}[5m]))",
           "legendFormat": "{{policy}}/{{key_group}}"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Observed remaining budget",
+      "description": "Minimum latest remaining budget among bounded key-group samples per policy. Samples are not live balances or fleet totals.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 30
+      },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "unit": "short"
+        }
+      },
+      "targets": [
+        {
+          "expr": "min by (policy) (quotaflow_tokens_remaining{policy=~\"$policy\"})",
+          "legendFormat": "{{policy}}",
+          "refId": "A"
         }
       ]
     }

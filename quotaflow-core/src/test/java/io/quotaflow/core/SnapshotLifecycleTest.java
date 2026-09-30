@@ -33,6 +33,7 @@ class SnapshotLifecycleTest {
         ContinuationLifecycleTest.until(()->flow.waitQueueDepth("leaf")==1);
         published.set(changed);resume.complete(null);
         assertTrue(result.get(2,TimeUnit.SECONDS).isAllowed());
+        flow.flushObservations().toCompletableFuture().orTimeout(2,TimeUnit.SECONDS).join();
         assertEquals(2,reads.get());assertEquals(List.of("leaf:global"),entries);assertEquals(List.of("leaf:default"),terminalGroups);
         for(int i=0;i<2;i++) for(var request:chains.get(i)) assertEquals(i+1,request.resolverRevision());
         assertEquals(chains.get(0).get(0).resolverFingerprint(),chains.get(0).get(1).resolverFingerprint());

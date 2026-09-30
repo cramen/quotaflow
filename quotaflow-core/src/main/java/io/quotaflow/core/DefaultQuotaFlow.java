@@ -1,6 +1,7 @@
 package io.quotaflow.core;
 
 import io.quotaflow.core.store.RateLimitStore;
+import io.quotaflow.core.observation.*;
 import io.quotaflow.core.execution.BoundedExecution;
 import io.quotaflow.core.execution.DeadlineScheduler;
 import java.time.Duration;
@@ -19,12 +20,18 @@ import java.util.function.BooleanSupplier;
  * already dispatched store debit. Strict priority is FIFO within a priority;
  * deadlines bound starvation. Listener callbacks must be fast and nonblocking.
  */
-public final class DefaultQuotaFlow implements QuotaFlow {
+public final class DefaultQuotaFlow implements QuotaFlow, AutoCloseable {
     private static final Executor DELIVERY = Executors.newFixedThreadPool(2, task -> {
         Thread thread = new Thread(task, "quotaflow-delivery");
         thread.setDaemon(true); return thread;
     });
-    private final AtomicReference<PolicySet> policySets;
+    private final ReentrantLock configurationLock = new ReentrantLock();
+    private final AtomicReference<ConfigurationState> configuration = new AtomicReference<>();
+    private final Set<ConfigurationState> generations = ConcurrentHashMap.newKeySet();
+    private final Set<Acquisition> acquisitions = ConcurrentHashMap.newKeySet();
+    private final AtomicLong observationSequence = new AtomicLong();
+    private final ObservationDispatcher observations;
+    private volatile boolean closed;
     private final PolicyEngine engine;
     private final List<DecisionListener> listeners;
     private final List<WaitListener> waitListeners;
@@ -38,7 +45,6 @@ public final class DefaultQuotaFlow implements QuotaFlow {
     private final AtomicLong configurationGeneration = new AtomicLong();
 
     private DefaultQuotaFlow(Builder builder) {
-        policySets = new AtomicReference<>(builder.policySet);
         engine = new PolicyEngine(builder.store, builder.defaultResolver, builder.namedResolvers, builder.limitResolver, builder.namespace);
         engine.registerPolicies(builder.policySet).toCompletableFuture().join();
         listeners = List.copyOf(builder.listeners);
@@ -46,12 +52,67 @@ public final class DefaultQuotaFlow implements QuotaFlow {
         maxWaitersPerPolicy = builder.maxWaitersPerPolicy;
         execution = builder.execution; operationNanos = builder.operationTimeout.toNanos(); nanoClock = builder.nanoClock;
         asyncExecutor = builder.asyncExecutor == null ? Runnable::run : builder.asyncExecutor;
+        var initial = new ConfigurationState(builder.policySet, 0);
+        configuration.set(initial); generations.add(initial);
+        observations = new ObservationDispatcher(listeners, waitListeners, builder.observers,
+                initial.view(), builder.observerQueueCapacity, builder.observerTimeout);
     }
     public static Builder builder(PolicySet policies, RateLimitStore store) { return new Builder(policies, store); }
     public void replacePolicySet(PolicySet policies) {
+        if (closed) throw new IllegalStateException("limiter is closed");
         engine.registerPolicies(Objects.requireNonNull(policies, "policySet")).toCompletableFuture().join();
-        policySets.set(policies); configurationGeneration.incrementAndGet(); queues.values().forEach(WaiterQueue::signalHead);
+        configurationLock.lock();
+        try {
+            if (closed) throw new IllegalStateException("limiter is closed");
+            var next = new ConfigurationState(policies, configurationGeneration.incrementAndGet());
+            generations.add(next);
+            var previous = configuration.getAndSet(next);
+            observations.configuration(next.view());
+            previous.retired = true; previous.tryRetire();
+        } finally { configurationLock.unlock(); }
+        queues.values().forEach(WaiterQueue::signalHead);
     }
+    private final class ConfigurationState {
+        final PolicySet policies; final long generation;
+        final AtomicInteger owners = new AtomicInteger();
+        final AtomicBoolean released = new AtomicBoolean();
+        volatile boolean retired;
+        ConfigurationState(PolicySet policies, long generation) { this.policies = policies; this.generation = generation; }
+        ObservationConfiguration view() {
+            var roots = new LinkedHashMap<String,String>(); var throttle = new HashSet<String>();
+            for (var policy : policies.policies()) {
+                roots.put(policy.id(), policies.rootPolicyId(policy.id()));
+                if (policy.reaction() == Reaction.THROTTLE) throttle.add(policy.id());
+            }
+            return new ObservationConfiguration(generation, roots, throttle);
+        }
+        void release() { owners.decrementAndGet(); tryRetire(); }
+        void tryRetire() {
+            if (retired && owners.get() == 0 && released.compareAndSet(false, true)) {
+                observations.retired(generation); generations.remove(this);
+                if (closed && generations.isEmpty()) observations.close();
+            }
+        }
+    }
+    /** Stops new acquisitions, cancels outstanding callers and retires this limiter's observation ownership. */
+    @Override public void close() {
+        configurationLock.lock();
+        try {
+            if (closed) return;
+            closed = true;
+            configuration.get().retired = true; configuration.get().tryRetire();
+        } finally { configurationLock.unlock(); }
+        for (Acquisition acquisition : List.copyOf(acquisitions)) acquisition.result.cancel(true);
+    }
+
+    /** Drains previously enqueued observation attempts, including bounded listener failures; performs no quota operation. */
+    public CompletionStage<Void> flushObservations() {
+        return observations.barrier().thenApplyAsync(ignored -> null, DELIVERY);
+    }
+    /** Failed callback/delivery attempts; nonzero means observation completeness must not be assumed. */
+    public long observationFailures() { return observations.failures(); }
+    /** Current immutable published configuration; no source or resolver is queried. */
+    public PolicySet policySet() { return configuration.get().policies; }
     public int waitQueueDepth(String policyId) { var queue = queues.get(policyId); return queue == null ? 0 : queue.size(); }
     int retainedQueues() { return queues.size(); }
     @Override public Decision tryAcquire(String id, RateLimitContext context) { return tryAcquire(id, context, 1); }
@@ -139,7 +200,8 @@ public final class DefaultQuotaFlow implements QuotaFlow {
         volatile boolean queued;
         long due, observedGeneration;
         ScheduledFuture<?> deadlineTimer, retryTimer, operationTimer;
-        CompletableFuture<Void> notifications = CompletableFuture.completedFuture(null);
+        ConfigurationState held;
+        long eventGeneration;
         CompletableFuture<Void> readiness;
 
         Acquisition(String id, RateLimitContext context, long weight, Duration timeout, Integer priority) {
@@ -147,8 +209,15 @@ public final class DefaultQuotaFlow implements QuotaFlow {
             Limit.validateWeight(weight);
             if (Objects.requireNonNull(timeout, "waitTimeout").isNegative()) throw new IllegalArgumentException("waitTimeout must not be negative");
             this.id = id; this.context = Objects.requireNonNull(context, "context"); this.weight = weight;
-            initial = policySets.get().policy(id); this.priority = resolvePriority(priority, context, initial);
             positive = !timeout.isZero(); deadline = start + (positive ? timeout.toNanos() : operationNanos);
+            configurationLock.lock();
+            try {
+                if (closed) throw new IllegalStateException("limiter is closed");
+                held = configuration.get();
+                initial = held.policies.policy(id); this.priority = resolvePriority(priority, context, initial);
+                held.owners.incrementAndGet(); eventGeneration = held.generation;
+                acquisitions.add(this);
+            } finally { configurationLock.unlock(); }
         }
         void armDeadline() {
             lock.lock();
@@ -156,7 +225,7 @@ public final class DefaultQuotaFlow implements QuotaFlow {
             finally { lock.unlock(); }
         }
         boolean active() {
-            if (terminal.get() != null) return false;
+            if (terminal.get() != null || closed) return false;
             if (nanoClock.getAsLong() - deadline >= 0) { timeout(); return false; }
             if (inFlight && nanoClock.getAsLong() - attemptDeadline >= 0) {
                 operationExpired(attemptSequence); return false;
@@ -182,7 +251,7 @@ public final class DefaultQuotaFlow implements QuotaFlow {
                 if (terminal.get() != null || inFlight) return;
                 if (waiter != null) {
                     if (!queue.isHead(waiter)) return;
-                    boolean changed = observedGeneration != configurationGeneration.get();
+                    boolean changed = observedGeneration != configuration.get().generation;
                     if (!changed && !ready) return;
                     if (!changed && due - nanoClock.getAsLong() > 0) {
                         if (retryTimer != null) retryTimer.cancel(false);
@@ -195,7 +264,15 @@ public final class DefaultQuotaFlow implements QuotaFlow {
                 inFlight = true;
                 if (retryTimer != null) { retryTimer.cancel(false); retryTimer = null; }
                 if (readiness != null) { readiness.cancel(false); readiness = null; }
-                policies = policySets.get(); observedGeneration = configurationGeneration.get();
+                configurationLock.lock();
+                try {
+                    if (closed) return;
+                    var next = configuration.get();
+                    if (held != next) {
+                        var previous = held; next.owners.incrementAndGet(); held = next; previous.release();
+                    }
+                    policies = held.policies; observedGeneration = held.generation; eventGeneration = held.generation;
+                } finally { configurationLock.unlock(); }
             } finally { lock.unlock(); }
             RateLimitPolicy policy;
             try { policy = policies.policy(id); }
@@ -220,6 +297,13 @@ public final class DefaultQuotaFlow implements QuotaFlow {
                             if (failure instanceof RejectedExecutionException) overflow(); else fail(failure);
                             return;
                         }
+                        lock.lock();
+                        try {
+                            if (terminal.get() != null) return;
+                            if (evaluation.rootPolicyId() != null) observations.budget(new BudgetObservation(
+                                    eventGeneration, observationSequence.incrementAndGet(), evaluation.rootPolicyId(),
+                                    evaluation.resolverRevision(), evaluation.budgets()));
+                        } finally { lock.unlock(); }
                         if (evaluation.decision().isAllowed() || policy.reaction() == Reaction.REJECT || !positive
                                 || (evaluation.decision().retryAfter().isEmpty() && evaluation.recoveryPending() == null)) {
                             complete(evaluation, false); return;
@@ -241,12 +325,7 @@ public final class DefaultQuotaFlow implements QuotaFlow {
                         queued = queue.offer(waiter); return queue;
                     });
                     if (!queued) { waiter = null; overflow = true; }
-                    else notifications = notifications.thenRunAsync(() -> {
-                        for (WaitListener listener : waitListeners) {
-                            try { listener.onQueued(id, evaluation.keyGroup()); }
-                            catch (RuntimeException failure) { logListenerFailure(failure); }
-                        }
-                    }, DELIVERY);
+                    else observations.queued(eventGeneration, id, evaluation.keyGroup());
                 }
                 ready = evaluation.recoveryPending() == null;
                 due = nanoClock.getAsLong() + evaluation.decision().retryAfter().map(Duration::toNanos).orElse(0L);
@@ -296,16 +375,10 @@ public final class DefaultQuotaFlow implements QuotaFlow {
             return terminal.compareAndSet(null, new Terminal(decision, null)) ? decision : null;
         }
         void publish(Decision decision, String group) {
+            observations.decision(eventGeneration, decision, group);
             cleanup();
-            // User listeners and dependent future callbacks never execute on the deadline scheduler.
-            lock.lock();
-            try { notifications = notifications.thenRunAsync(() -> {
-                for (DecisionListener listener : listeners) {
-                    try { listener.onDecision(decision, group); }
-                    catch (RuntimeException failure) { logListenerFailure(failure); }
-                }
-                result.complete(decision);
-            }, DELIVERY); } finally { lock.unlock(); }
+            // Public future callbacks cannot occupy an observer lane or the deadline scheduler.
+            DELIVERY.execute(() -> result.complete(decision));
         }
         void fail(Throwable failure) {
             lock.lock();
@@ -314,7 +387,7 @@ public final class DefaultQuotaFlow implements QuotaFlow {
             cleanup(); DELIVERY.execute(() -> result.completeExceptionally(failure));
         }
         void cleanup() {
-            WaiterQueue owned; WaiterQueue.Waiter entry;
+            WaiterQueue owned; WaiterQueue.Waiter entry; ConfigurationState generation;
             lock.lock();
             try {
                 if (deadlineTimer != null) { deadlineTimer.cancel(false); deadlineTimer = null; }
@@ -322,14 +395,13 @@ public final class DefaultQuotaFlow implements QuotaFlow {
                 if (retryTimer != null) { retryTimer.cancel(false); retryTimer = null; }
                 if (readiness != null) { var detached = readiness; readiness = null; detached.cancel(false); }
                 owned = queue; entry = waiter; queue = null; waiter = null; last = null;
-                result.detach();
+                result.detach(); generation = held; held = null;
             } finally { lock.unlock(); }
+            acquisitions.remove(this);
+            if (generation != null) generation.release();
             if (owned != null && entry != null) owned.remove(entry);
             if (owned != null) queues.computeIfPresent(id, (key, current) -> current == owned && current.size() == 0 ? null : current);
         }
-    }
-    private static void logListenerFailure(RuntimeException failure) {
-        org.slf4j.LoggerFactory.getLogger(DefaultQuotaFlow.class).warn("quota listener failed", failure);
     }
     private static int resolvePriority(Integer explicit, RateLimitContext context, RateLimitPolicy policy) {
         if (explicit != null) return explicit;
@@ -346,8 +418,24 @@ public final class DefaultQuotaFlow implements QuotaFlow {
         private final Map<String, KeyResolver> namedResolvers = new LinkedHashMap<>();
         private final List<DecisionListener> listeners = new ArrayList<>();
         private final List<WaitListener> waitListeners = new ArrayList<>();
+        private final List<ObservationListener> observers = new ArrayList<>();
+        private int observerQueueCapacity = 1024;
+        private Duration observerTimeout = Duration.ofSeconds(1);
+        public Builder addObservationListener(ObservationListener observer) {
+            Objects.requireNonNull(observer, "observer");
+            if (observers.stream().noneMatch(existing -> existing == observer)) observers.add(observer);
+            return this;
+        }
+        /** Per-listener delivery bounds; a blocked or overflowing listener is disabled with a safe diagnostic. */
+        public Builder observationDelivery(int capacity, Duration timeout) {
+            if (capacity < 1 || Objects.requireNonNull(timeout, "timeout").isZero() || timeout.isNegative())
+                throw new IllegalArgumentException("observation delivery bounds must be positive");
+            timeout.toNanos(); observerQueueCapacity = capacity; observerTimeout = timeout; return this;
+        }
         public Builder addWaitListener(WaitListener listener) {
-            waitListeners.add(Objects.requireNonNull(listener, "listener")); return this;
+            Objects.requireNonNull(listener, "listener");
+            if (listener instanceof ObservationListener observer) return addObservationListener(observer);
+            waitListeners.add(listener); return this;
         }
         private LimitResolver limitResolver;
         private String namespace = io.quotaflow.core.store.QuotaDomain.DEFAULT_NAMESPACE;
@@ -403,8 +491,9 @@ public final class DefaultQuotaFlow implements QuotaFlow {
         }
 
         public Builder addListener(DecisionListener listener) {
-            listeners.add(Objects.requireNonNull(listener, "listener"));
-            return this;
+            Objects.requireNonNull(listener, "listener");
+            if (listener instanceof ObservationListener observer) return addObservationListener(observer);
+            listeners.add(listener); return this;
         }
 
         /**

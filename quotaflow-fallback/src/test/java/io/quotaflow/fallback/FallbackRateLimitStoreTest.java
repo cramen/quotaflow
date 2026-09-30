@@ -222,7 +222,10 @@ class FallbackRateLimitStoreTest {
         var child = RateLimitPolicy.builder("child").scope(Scope.USER).parentId("root").limit(new Limit(3, 1, Duration.ofSeconds(1))).build();
         var policies = PolicySet.compile(List.of(root, child)); var primary = new RecoveryPrimaryFixture(policies); var time = new AtomicLong();
         try (var store = new FallbackRateLimitStore(primary, settings(4, 10), List.of(), time::get)) {
-            var flow = DefaultQuotaFlow.builder(policies, store).build();
+            var samples = new java.util.concurrent.CopyOnWriteArrayList<io.quotaflow.core.observation.BudgetSample>();
+            var flow = DefaultQuotaFlow.builder(policies, store).addObservationListener(initial -> new io.quotaflow.core.observation.ObservationSession() {
+                public void onBudget(io.quotaflow.core.observation.BudgetObservation observation) { samples.addAll(observation.samples()); }
+            }).build();
             var user = RateLimitContext.builder().put(RateLimitContext.PRINCIPAL, "user").build();
             await(() -> store.state() == DegradationState.CLOSED);
             assertTrue(flow.tryAcquire("child", user).isAllowed());
@@ -232,6 +235,9 @@ class FallbackRateLimitStoreTest {
             var blocked = flow.tryAcquire("child", user, 2);
             assertFalse(blocked.isAllowed()); assertEquals(0, blocked.remaining()); assertTrue(blocked.retryAfter().isEmpty());
             assertTrue(flow.tryAcquire("root", RateLimitContext.empty(), 2).isAllowed());
+            flow.flushObservations().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            assertTrue(samples.stream().anyMatch(sample -> sample.policyId().equals("child") && sample.budget().equals(new StoreBudget(0, 0, true))));
+            assertTrue(samples.stream().anyMatch(sample -> sample.policyId().equals("root") && sample.budget().capacity() == 25 && sample.budget().degraded()));
         }
     }
     @Test void invalidAdapterOutcomesFailBoundedlyInsteadOfHangingOrGrantingFallback() throws Exception {
@@ -266,8 +272,10 @@ class FallbackRateLimitStoreTest {
             primary.delayedAcquisition = null; primary.available = true;
             await(() -> store.state() == DegradationState.CLOSED); assertFalse(old.join().acquired());
             primary.available = false; store.tryAcquireAll(request).toCompletableFuture().join();
+            store.flushObservations().toCompletableFuture().orTimeout(2, TimeUnit.SECONDS).join();
             int before = notifications.get();
             delayed.completeExceptionally(new IllegalStateException("lost old response"));
+            store.flushObservations().toCompletableFuture().orTimeout(2, TimeUnit.SECONDS).join();
             assertEquals(before, notifications.get()); assertEquals(DegradationState.OPEN, store.state());
         }
     }

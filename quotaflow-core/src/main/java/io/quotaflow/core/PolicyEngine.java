@@ -1,6 +1,7 @@
 package io.quotaflow.core;
 
 import io.quotaflow.core.store.BatchRateLimitStore;
+import io.quotaflow.core.observation.BudgetSample;
 import io.quotaflow.core.store.BucketIdentity;
 import io.quotaflow.core.store.QuotaDomain;
 import io.quotaflow.core.store.PolicyBinding;
@@ -139,18 +140,20 @@ public final class PolicyEngine {
             return batchEvaluation(levels, requests.size(), result);
         }
         long minRemaining = Long.MAX_VALUE;
+        var budgets = new ArrayList<BudgetSample>();
         for (PendingLevel level : levels) {
             if (!level.reachesStore()) {
-                return rejectedBeforeStore(level);
+                return observed(rejectedBeforeStore(level), levels, budgets);
             }
             StoreResult result =
                     store.tryAcquire(level.storageKey(), level.limit(), level.policy().algorithm(), weight);
+            addBudget(budgets, level, result);
             if (!result.acquired()) {
-                return rejection(level, result);
+                return observed(rejection(level, result), levels, budgets);
             }
             minRemaining = Math.min(minRemaining, result.remaining());
         }
-        return allowed(levels.get(levels.size() - 1), minRemaining);
+        return observed(allowed(levels.get(levels.size() - 1), minRemaining), levels, budgets);
     }
 
     CompletionStage<Evaluation> evaluateInternalAsync(
@@ -185,8 +188,9 @@ public final class PolicyEngine {
                     return execution.submitStage(() -> batch.tryAcquireAll(requests), active)
                             .thenApply(result -> batchEvaluation(levels, requests.size(), result));
                 }
-                return acquireChain(levels, 0, weight, Long.MAX_VALUE, execution, active);
-            });
+                return acquireChain(levels, 0, weight, Long.MAX_VALUE, execution, active, new ArrayList<>());
+            }).thenApply(evaluation -> evaluation.observed(evaluation.budgets(), policies.rootPolicyId(leafPolicyId),
+                    snapshot == null ? 0 : snapshot.revision()));
         });
     }
 
@@ -246,7 +250,23 @@ public final class PolicyEngine {
      * level, which rejects without a refill schedule after the allowed store
      * levels.
      */
-    private static Evaluation batchEvaluation(
+    private static Evaluation batchEvaluation(List<PendingLevel> levels, int resolvedCount, ChainResult result) {
+        var budgets = new ArrayList<BudgetSample>();
+        for (var sample : result.budgets()) {
+            if (sample.level() >= resolvedCount) throw new io.quotaflow.core.store.StateCompatibilityException("budget level is outside the evaluated chain");
+            var level = levels.get(sample.level());
+            budgets.add(new BudgetSample(level.policy().id(), level.keyGroup(), level.policy().algorithm(), sample.budget()));
+        }
+        return observed(batchDecision(levels, resolvedCount, result), levels, budgets);
+    }
+    private static Evaluation observed(Evaluation evaluation, List<PendingLevel> levels, List<BudgetSample> budgets) {
+        var first = levels.get(0);
+        return evaluation.observed(budgets, first.storageKey() == null ? first.policy().id() : first.storageKey().domain().rootPolicyId(), first.resolverRevision);
+    }
+    private static void addBudget(List<BudgetSample> budgets, PendingLevel level, StoreResult result) {
+        if (result.budget() != null) budgets.add(new BudgetSample(level.policy().id(), level.keyGroup(), level.policy().algorithm(), result.budget()));
+    }
+    private static Evaluation batchDecision(
             List<PendingLevel> levels, int resolvedCount, ChainResult result) {
         if (!result.acquired()) {
             PendingLevel fired = levels.get(result.firedLevelIndex());
@@ -264,20 +284,21 @@ public final class PolicyEngine {
 
     private CompletionStage<Evaluation> acquireChain(
             List<PendingLevel> levels, int index, long weight, long minRemaining,
-            BoundedExecution execution, BooleanSupplier active) {
+            BoundedExecution execution, BooleanSupplier active, List<BudgetSample> budgets) {
         if (index == levels.size()) {
-            return CompletableFuture.completedFuture(allowed(levels.get(levels.size() - 1), minRemaining));
+            return CompletableFuture.completedFuture(observed(allowed(levels.get(levels.size() - 1), minRemaining), levels, budgets));
         }
         PendingLevel level = levels.get(index);
         if (!level.reachesStore()) {
-            return CompletableFuture.completedFuture(rejectedBeforeStore(level));
+            return CompletableFuture.completedFuture(observed(rejectedBeforeStore(level), levels, budgets));
         }
         return execution.submitStage(() -> store.tryAcquireAsync(level.storageKey(), level.limit(), level.policy().algorithm(), weight), active)
                 .thenCompose(result -> {
+                    addBudget(budgets, level, result);
                     if (!result.acquired()) {
-                        return CompletableFuture.completedFuture(rejection(level, result));
+                        return CompletableFuture.completedFuture(observed(rejection(level, result), levels, budgets));
                     }
-                    return acquireChain(levels, index + 1, weight, Math.min(minRemaining, result.remaining()), execution, active);
+                    return acquireChain(levels, index + 1, weight, Math.min(minRemaining, result.remaining()), execution, active, budgets);
                 });
     }
 

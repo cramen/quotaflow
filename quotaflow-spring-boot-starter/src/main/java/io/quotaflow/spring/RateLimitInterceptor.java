@@ -15,6 +15,7 @@ import java.util.function.Supplier;
 import org.aopalliance.intercept.MethodInterceptor;
 import org.aopalliance.intercept.MethodInvocation;
 import org.springframework.aop.support.AopUtils;
+import org.springframework.aop.ProxyMethodInvocation;
 import org.springframework.boot.convert.DurationStyle;
 import org.springframework.context.EmbeddedValueResolverAware;
 import org.springframework.context.expression.MethodBasedEvaluationContext;
@@ -52,27 +53,32 @@ import org.springframework.util.StringValueResolver;
  * Rejections are raised as {@link RateLimitExceededException} — as a returned
  * failing publisher on the reactive path.
  */
-public class RateLimitInterceptor implements MethodInterceptor, EmbeddedValueResolverAware {
+public class RateLimitInterceptor implements MethodInterceptor, EmbeddedValueResolverAware, org.springframework.beans.factory.BeanClassLoaderAware {
 
-    private static final boolean REACTOR_PRESENT =
-            ClassUtils.isPresent("reactor.core.publisher.Mono", RateLimitInterceptor.class.getClassLoader());
-    private static final boolean SECURITY_PRESENT = ClassUtils.isPresent(
-            "org.springframework.security.core.context.SecurityContextHolder",
-            RateLimitInterceptor.class.getClassLoader());
-    private static final boolean SERVLET_PRESENT = ClassUtils.isPresent(
-            "org.springframework.web.context.request.RequestContextHolder",
-            RateLimitInterceptor.class.getClassLoader());
+    private boolean reactorPresent, securityPresent, servletPresent;
+
+    @Override public void setBeanClassLoader(ClassLoader loader) {
+        reactorPresent = ClassUtils.isPresent("reactor.core.publisher.Mono", loader);
+        securityPresent = ClassUtils.isPresent("org.springframework.security.core.context.SecurityContextHolder", loader);
+        servletPresent = ClassUtils.isPresent("org.springframework.web.context.request.RequestContextHolder", loader)
+                && ClassUtils.isPresent("jakarta.servlet.http.HttpServletRequest", loader);
+    }
 
     private final QuotaFlow quotaFlow;
     private final Supplier<PolicySet> policySets;
     private final SpelExpressionParser parser = new SpelExpressionParser();
     private final ParameterNameDiscoverer parameterNames = new DefaultParameterNameDiscoverer();
-    private final ConcurrentHashMap<Method, Expression> keyExpressions = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<Method, Expression> weightExpressions = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Method, CachedExpression> keyExpressions = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Method, CachedExpression> weightExpressions = new ConcurrentHashMap<>();
 
+    private record CachedExpression(String text, Expression expression) { }
+    private record Identity(Object principal, Object authentication, String name) {
+        static final Identity NONE = new Identity(null, null, null);
+    }
     private StringValueResolver embeddedValueResolver;
 
     public RateLimitInterceptor(QuotaFlow quotaFlow, Supplier<PolicySet> policySets) {
+        setBeanClassLoader(RateLimitInterceptor.class.getClassLoader());
         this.quotaFlow = Objects.requireNonNull(quotaFlow, "quotaFlow");
         this.policySets = Objects.requireNonNull(policySets, "policySets");
     }
@@ -90,25 +96,18 @@ public class RateLimitInterceptor implements MethodInterceptor, EmbeddedValueRes
         if (annotation == null) {
             return invocation.proceed();
         }
-        RateLimitPolicy policy = policySets.get().policy(annotation.policy());
-        boolean reactive = REACTOR_PRESENT && ReactorSupport.isReactive(method.getReturnType());
-        EvaluationContext evaluationContext = evaluationContext(invocation, method);
-        RateLimitContext context;
-        try {
-            context = limitingContext(annotation, policy, method, evaluationContext);
-        } catch (RateLimitExceededException rejection) {
-            if (reactive) {
-                return ReactorSupport.failure(method.getReturnType(), rejection);
-            }
-            throw rejection;
+        if (reactorPresent && ReactorSupport.isReactive(method.getReturnType())) {
+            if (!(invocation instanceof ProxyMethodInvocation proxy))
+                throw new IllegalStateException("reactive limiting requires a cloneable Spring method invocation");
+            var snapshot = (ProxyMethodInvocation) proxy.invocableClone(proxy.getArguments().clone());
+            return ReactorSupport.invoke(this, snapshot, annotation, method);
         }
+        RateLimitPolicy policy = policySets.get().policy(annotation.policy());
+        Identity identity = securityPresent ? SecuritySupport.currentIdentity() : Identity.NONE;
+        EvaluationContext evaluationContext = evaluationContext(invocation, method, identity, true);
+        RateLimitContext context = limitingContext(annotation, policy, method, evaluationContext, identity);
         long weight = weight(annotation, method, evaluationContext);
         Duration waitTimeout = waitTimeout(annotation);
-        if (reactive) {
-            return ReactorSupport.invoke(
-                    invocation, quotaFlow, annotation.policy(), context, weight, waitTimeout,
-                    method.getReturnType());
-        }
         Decision decision = waitTimeout.isZero()
                 ? quotaFlow.tryAcquire(annotation.policy(), context, weight)
                 : quotaFlow.acquire(annotation.policy(), context, weight, waitTimeout);
@@ -132,46 +131,42 @@ public class RateLimitInterceptor implements MethodInterceptor, EmbeddedValueRes
      * security principal seeds the principal attribute when the key did not.
      */
     private RateLimitContext limitingContext(
-            RateLimited annotation, RateLimitPolicy policy, Method method, EvaluationContext evaluationContext) {
-        String key = evaluateKey(annotation, method, evaluationContext);
+            RateLimited annotation, RateLimitPolicy policy, Method method, EvaluationContext evaluationContext, Identity identity) {
+        String expression = resolvePlaceholders(annotation.key());
+        boolean explicit = expression != null && !expression.isBlank();
+        String key = evaluateKey(expression, method, evaluationContext);
+        if (key == null && !explicit && policy.scope() == Scope.USER) key = identity.name();
         RateLimitContext.Builder builder = RateLimitContext.builder();
-        boolean principalSeeded = false;
-        if (key == null) {
-            // a global policy resolves to a single fixed bucket and never needs a key
-            if (policy.scope() != Scope.GLOBAL
-                    && annotation.onMissingKey() == OnMissingKey.REJECT) {
-                throw new RateLimitExceededException(
-                        Decision.rejectedWithoutSchedule(policy.id(), policy.scope()));
-            }
-            // USE_DEFAULT_KEY (or global scope): nothing seeded; the policy's
-            // default key (if any) or the fixed global bucket applies
-        } else {
+        if (key == null && (explicit || policy.scope() != Scope.GLOBAL)) {
+            if (annotation.onMissingKey() == OnMissingKey.REJECT || policy.defaultKey().isEmpty())
+                throw new RateLimitExceededException(Decision.rejectedWithoutSchedule(policy.id(), policy.scope()));
+            // An explicit missing key selecting a default must not silently become the principal.
+        } else if (key != null) {
             switch (policy.scope()) {
                 case TENANT -> builder.put(RateLimitContext.TENANT_ID, key);
-                case USER -> {
-                    builder.put(RateLimitContext.PRINCIPAL, key);
-                    principalSeeded = true;
-                }
+                case USER -> builder.put(RateLimitContext.PRINCIPAL, key);
                 case KEY -> builder.put(RateLimitContext.API_KEY, key);
-                case GLOBAL -> {
-                    // global policies resolve to a single fixed bucket
-                }
+                case GLOBAL -> { }
             }
         }
-        Object principal = currentPrincipal();
-        if (principal != null && !principalSeeded) {
-            builder.put(RateLimitContext.PRINCIPAL, SecuritySupport.principalName(principal));
-        }
+        if (identity.name() != null && policy.scope() != Scope.USER)
+            builder.put(RateLimitContext.PRINCIPAL, identity.name());
         return builder.build();
     }
 
-    private String evaluateKey(RateLimited annotation, Method method, EvaluationContext evaluationContext) {
-        String keyExpression = resolvePlaceholders(annotation.key());
+    private String evaluateKey(String keyExpression, Method method, EvaluationContext evaluationContext) {
         if (keyExpression == null || keyExpression.isBlank()) {
             return null;
         }
-        Expression expression = keyExpressions.computeIfAbsent(method, m -> parser.parseExpression(keyExpression));
-        Object value = expression.getValue(evaluationContext);
+        Expression expression = cached(keyExpressions, method, keyExpression);
+        Object value;
+        try { value = expression.getValue(evaluationContext); }
+        catch (org.springframework.expression.spel.SpelEvaluationException failure) {
+            String code = failure.getMessageCode().name();
+            if (code.equals("PROPERTY_OR_FIELD_NOT_READABLE_ON_NULL") || code.equals("METHOD_CALL_ON_NULL_OBJECT_NOT_ALLOWED")
+                    || code.equals("CANNOT_INDEX_INTO_NULL_VALUE")) return null;
+            throw failure;
+        }
         if (value == null) {
             return null;
         }
@@ -184,7 +179,7 @@ public class RateLimitInterceptor implements MethodInterceptor, EmbeddedValueRes
         long weight;
         if (text.startsWith("#")) {
             Expression expression =
-                    weightExpressions.computeIfAbsent(method, m -> parser.parseExpression(text));
+                    cached(weightExpressions, method, text);
             Object value = expression.getValue(evaluationContext);
             if (!(value instanceof Number number)) {
                 throw new IllegalStateException("weight expression '" + text + "' on method " + method
@@ -216,28 +211,22 @@ public class RateLimitInterceptor implements MethodInterceptor, EmbeddedValueRes
         return waitTimeout;
     }
 
-    private EvaluationContext evaluationContext(MethodInvocation invocation, Method method) {
+    private Expression cached(ConcurrentHashMap<Method, CachedExpression> cache, Method method, String text) {
+        return cache.compute(method, (key, old) -> old != null && old.text().equals(text)
+                ? old : new CachedExpression(text, parser.parseExpression(text))).expression();
+    }
+
+    private EvaluationContext evaluationContext(MethodInvocation invocation, Method method, Identity identity, boolean servlet) {
         MethodBasedEvaluationContext context = new MethodBasedEvaluationContext(
                 invocation.getThis() != null ? invocation.getThis() : method.getDeclaringClass(),
                 method, invocation.getArguments(), parameterNames);
-        if (SECURITY_PRESENT) {
-            Object principal = currentPrincipal();
-            if (principal != null) {
-                context.setVariable("principal", principal);
-                context.setVariable("authentication", SecuritySupport.authentication());
-            }
-        }
-        if (SERVLET_PRESENT) {
+        context.setVariable("principal", identity.principal());
+        context.setVariable("authentication", identity.authentication());
+        if (servlet && servletPresent) {
             Object request = ServletSupport.currentRequest();
-            if (request != null) {
-                context.setVariable("request", request);
-            }
+            if (request != null) context.setVariable("request", request);
         }
         return context;
-    }
-
-    private Object currentPrincipal() {
-        return SECURITY_PRESENT ? SecuritySupport.currentPrincipal() : null;
     }
 
     private String resolvePlaceholders(String value) {
@@ -254,23 +243,28 @@ public class RateLimitInterceptor implements MethodInterceptor, EmbeddedValueRes
 
     /** Spring Security access; loaded only when the security context holder is present. */
     private static final class SecuritySupport {
-
-        static Object currentPrincipal() {
-            org.springframework.security.core.Authentication authentication = authentication();
-            return authentication != null && authentication.isAuthenticated()
-                    ? authentication.getPrincipal()
-                    : null;
+        static Identity currentIdentity() {
+            return identity(org.springframework.security.core.context.SecurityContextHolder.getContext().getAuthentication());
         }
-
-        static org.springframework.security.core.Authentication authentication() {
-            return org.springframework.security.core.context.SecurityContextHolder
-                    .getContext()
-                    .getAuthentication();
+        static Identity identity(org.springframework.security.core.Authentication authentication) {
+            if (authentication == null || !authentication.isAuthenticated()
+                    || authentication instanceof org.springframework.security.authentication.AnonymousAuthenticationToken)
+                return Identity.NONE;
+            String name = authentication.getName();
+            return new Identity(authentication.getPrincipal(), authentication,
+                    name == null || name.isBlank() ? null : name);
         }
+    }
 
-        static String principalName(Object principal) {
-            org.springframework.security.core.Authentication authentication = authentication();
-            return authentication != null ? authentication.getName() : String.valueOf(principal);
+    /** Reactive security linkage is isolated from servlet-only applications. */
+    private static final class ReactiveSecuritySupport {
+        static reactor.core.publisher.Mono<Object> context() {
+            return org.springframework.security.core.context.ReactiveSecurityContextHolder.getContext()
+                    .cast(Object.class).defaultIfEmpty(Identity.NONE);
+        }
+        static Identity identity(Object value) {
+            return value instanceof org.springframework.security.core.context.SecurityContext context
+                    ? SecuritySupport.identity(context.getAuthentication()) : Identity.NONE;
         }
     }
 
@@ -295,34 +289,76 @@ public class RateLimitInterceptor implements MethodInterceptor, EmbeddedValueRes
                     || reactor.core.publisher.Flux.class.isAssignableFrom(returnType);
         }
 
-        static Object failure(Class<?> returnType, Throwable error) {
-            return reactor.core.publisher.Mono.class.isAssignableFrom(returnType)
-                    ? reactor.core.publisher.Mono.error(error)
-                    : reactor.core.publisher.Flux.error(error);
+        private record Prepared(MethodInvocation invocation, RateLimitContext context, long weight) { }
+        private static final class Subscription {
+            final java.util.concurrent.atomic.AtomicBoolean active = new java.util.concurrent.atomic.AtomicBoolean(true);
+            final java.util.concurrent.atomic.AtomicInteger invocation = new java.util.concurrent.atomic.AtomicInteger();
+            void cancel() { active.set(false); invocation.compareAndSet(0, 2); }
+            boolean begin() { return invocation.compareAndSet(0, 1); }
         }
-
-        static Object invoke(MethodInvocation invocation, QuotaFlow quotaFlow, String policyId,
-                RateLimitContext context, long weight, Duration waitTimeout, Class<?> returnType) {
-            reactor.core.publisher.Mono<Decision> decision = reactor.core.publisher.Mono.defer(() -> {
-                CompletionStage<Decision> acquisition = waitTimeout.isZero()
-                        ? quotaFlow.tryAcquireAsync(policyId, context, weight)
-                        : quotaFlow.acquireAsync(policyId, context, weight, waitTimeout);
-                return reactor.core.publisher.Mono.fromCompletionStage(acquisition);
-            });
-            if (reactor.core.publisher.Mono.class.isAssignableFrom(returnType)) {
-                return decision.flatMap(d -> {
-                    if (!d.isAllowed()) {
-                        return reactor.core.publisher.Mono.error(new RateLimitExceededException(d));
-                    }
-                    return proceedMono(invocation);
+        static Object invoke(RateLimitInterceptor interceptor, ProxyMethodInvocation snapshot,
+                RateLimited annotation, Method method) {
+            if (reactor.core.publisher.Mono.class.isAssignableFrom(method.getReturnType()))
+                return reactor.core.publisher.Mono.defer(() -> {
+                    var subscription = new Subscription();
+                    return prepare(interceptor, snapshot, annotation, method, subscription)
+                            .flatMap(invocation -> subscription.begin() ? proceedMono(invocation) : reactor.core.publisher.Mono.empty())
+                            .doOnCancel(subscription::cancel);
                 });
-            }
-            return decision.flatMapMany(d -> {
-                if (!d.isAllowed()) {
-                    return reactor.core.publisher.Flux.error(new RateLimitExceededException(d));
-                }
-                return proceedFlux(invocation);
+            return reactor.core.publisher.Flux.defer(() -> {
+                var subscription = new Subscription();
+                return prepare(interceptor, snapshot, annotation, method, subscription)
+                        .flatMapMany(invocation -> subscription.begin() ? proceedFlux(invocation) : reactor.core.publisher.Flux.empty())
+                        .doOnCancel(subscription::cancel);
             });
+        }
+        private static reactor.core.publisher.Mono<MethodInvocation> prepare(RateLimitInterceptor interceptor,
+                ProxyMethodInvocation snapshot, RateLimited annotation, Method method, Subscription subscription) {
+            long started = System.nanoTime();
+            var policy = interceptor.policySets.get().policy(annotation.policy());
+            Duration timeout = interceptor.waitTimeout(annotation);
+            boolean positive = !timeout.isZero();
+            Duration bound = positive ? timeout : Duration.ofSeconds(1);
+            long deadline = started + bound.toNanos();
+            Duration preparationBound = bound.compareTo(Duration.ofSeconds(1)) < 0 ? bound : Duration.ofSeconds(1);
+            var authentication = interceptor.securityPresent ? ReactiveSecuritySupport.context() : reactor.core.publisher.Mono.just((Object)Identity.NONE);
+            reactor.core.publisher.Mono<MethodInvocation> accepted = authentication.flatMap(value -> reactor.core.publisher.Mono.fromCompletionStage(
+                    io.quotaflow.core.execution.BoundedExecution.shared().submit(() -> {
+                        var invocation = snapshot.invocableClone(snapshot.getArguments().clone());
+                        var identity = interceptor.securityPresent ? ReactiveSecuritySupport.identity(value) : Identity.NONE;
+                        var evaluation = interceptor.evaluationContext(invocation, method, identity, false);
+                        return new Prepared(invocation, interceptor.limitingContext(annotation, policy, method, evaluation, identity),
+                                interceptor.weight(annotation, method, evaluation));
+                    }, subscription.active::get)))
+                    .timeout(preparationBound)
+                    .flatMap(prepared -> {
+                        long remaining = deadline - System.nanoTime();
+                        if (remaining <= 0) return reactor.core.publisher.Mono.error(rejection(policy, positive, started, true, false));
+                        var acquisition = positive
+                                ? interceptor.quotaFlow.acquireAsync(policy.id(), prepared.context(), prepared.weight(), Duration.ofNanos(remaining))
+                                : interceptor.quotaFlow.tryAcquireAsync(policy.id(), prepared.context(), prepared.weight());
+                        return reactor.core.publisher.Mono.fromCompletionStage(acquisition).flatMap(decision -> decision.isAllowed()
+                                ? reactor.core.publisher.Mono.just(prepared.invocation())
+                                : reactor.core.publisher.Mono.error(new RateLimitExceededException(decision)));
+                    })
+                    ;
+            // The default facade owns the deadline and its last known refill metadata.
+            // An extra timer must not race it into an invented schedule-less timeout.
+            if (!(interceptor.quotaFlow instanceof io.quotaflow.core.DefaultQuotaFlow)) accepted = accepted.timeout(bound);
+            return accepted.onErrorMap(java.util.concurrent.TimeoutException.class, failure ->
+                            rejection(policy, positive, started, System.nanoTime() - deadline >= 0, false))
+                    .onErrorMap(java.util.concurrent.RejectedExecutionException.class, failure ->
+                            rejection(policy, positive, started, false, true))
+                    .doFinally(signal -> subscription.active.set(false));
+        }
+        private static RateLimitExceededException rejection(RateLimitPolicy policy, boolean positive, long started,
+                boolean expired, boolean saturated) {
+            Decision decision = Decision.rejectedWithoutSchedule(policy.id(), policy.scope());
+            if (positive && expired) decision = decision.withThrottleRejection(io.quotaflow.core.ThrottleRejection.WAIT_TIMEOUT)
+                    .withWait(Duration.ofNanos(Math.max(0, System.nanoTime() - started)));
+            else if (positive && saturated && policy.reaction() == io.quotaflow.core.Reaction.THROTTLE)
+                decision = decision.withThrottleRejection(io.quotaflow.core.ThrottleRejection.QUEUE_OVERFLOW);
+            return new RateLimitExceededException(decision);
         }
 
         @SuppressWarnings("unchecked")

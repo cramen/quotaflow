@@ -24,8 +24,10 @@ class SuspendAcquireTest {
 
     @Test
     fun `suspend try-acquire returns the same decisions as the Java facade`() = runTest {
-        val javaFlow = flowFor(rejectPolicy("p", 2, 1, Duration.ofHours(1)))
-        val coroutineFlow = flowFor(rejectPolicy("p", 2, 1, Duration.ofHours(1)))
+        val policies = PolicySet.compile(listOf(rejectPolicy("p", 2, 1, Duration.ofHours(1))))
+        // Compare facade semantics with identical store time, not independent wall clocks.
+        val javaFlow = CoroutineQuotaFlow.builder(policies, LocalRateLimitStore { 0L }).build()
+        val coroutineFlow = CoroutineQuotaFlow.builder(policies, LocalRateLimitStore { 0L }).build()
 
         repeat(3) { attempt ->
             val expected = javaFlow.delegate.tryAcquire("p", context, 1)

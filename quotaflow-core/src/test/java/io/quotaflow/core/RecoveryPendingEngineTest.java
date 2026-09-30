@@ -52,6 +52,7 @@ class RecoveryPendingEngineTest {
         var flow = DefaultQuotaFlow.builder(POLICIES, store).addListener((decision, group) -> notifications.incrementAndGet()).build();
         var decision = flow.acquire("p", RateLimitContext.empty(), 1, Duration.ZERO);
         assertFalse(decision.isAllowed()); assertTrue(decision.retryAfter().isEmpty());
+        flow.flushObservations().toCompletableFuture().orTimeout(2, TimeUnit.SECONDS).join();
         assertEquals(Duration.ZERO, decision.waitDuration()); assertEquals(1, notifications.get());
         assertFalse(store.pending.get().readiness().toCompletableFuture().isDone());
     }

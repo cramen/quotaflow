@@ -15,7 +15,23 @@ import org.slf4j.LoggerFactory;
 public class CoordinatedFallbackStore implements BatchRateLimitStore, RecoveryConfigurationAware, AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(CoordinatedFallbackStore.class);
     private enum Mode { UNENROLLED, LOCAL, GUARDED, FENCED, READY, NORMAL, INCOMPATIBLE }
-    private record Configuration(RecoveryPolicySource source, long revision) { }
+    private final class Configuration {
+        final RecoveryPolicySource source; final long revision; final Set<String> policies;
+        final AtomicInteger owners = new AtomicInteger(); final AtomicBoolean released = new AtomicBoolean();
+        volatile boolean retired;
+        Configuration(RecoveryPolicySource source, long revision, PolicySet policies) {
+            this.source = source; this.revision = revision;
+            this.policies = policies.policies().stream().map(policy -> policy.id()).collect(java.util.stream.Collectors.toUnmodifiableSet());
+        }
+        void release() { owners.decrementAndGet(); retireIfDrained(); }
+        void retireIfDrained() {
+            if (retired && owners.get() == 0 && released.compareAndSet(false, true)) {
+                long retiredRevision = revision;
+                notifyListeners(listener -> listener.onRetired(retiredRevision)); configurations.remove(this);
+                if (closed.get() && configurations.isEmpty()) callbacks.forEach(io.quotaflow.core.execution.CallbackDispatcher::close);
+            }
+        }
+    }
     private record Backoff(long started, long duration) { }
     private record ResolverIdentity(long revision, String fingerprint) { }
     private record AppliedTarget(RecoveryPending fence, RecoveryPolicySource.Target target) { }
@@ -90,12 +106,14 @@ public class CoordinatedFallbackStore implements BatchRateLimitStore, RecoveryCo
         final List<RecoveryTracking.Entry> entries;
         final AtomicBoolean released = new AtomicBoolean(), terminal = new AtomicBoolean();
         final List<LevelRequest> requests;
+        final Configuration cfg;
         final CompletableFuture<ChainResult> result = new CompletableFuture<>();
-        Attempt(Domain domain, Route route, List<RecoveryTracking.Entry> entries, List<LevelRequest> requests) {
+        Attempt(Domain domain, Route route, List<RecoveryTracking.Entry> entries, List<LevelRequest> requests, Configuration cfg) {
+            this.cfg = cfg;
             this.domain = domain; this.route = route; this.context = route.context; this.entries = entries; this.requests = requests;
         }
         void finish(ChainResult value, boolean degraded) {
-            if (terminal.compareAndSet(false, true)) result.complete(degraded ? fallback(requests, value) : value);
+            if (terminal.compareAndSet(false, true)) result.complete(degraded ? fallback(cfg, requests, value) : value);
         }
         void fail(Throwable failure) {
             if (terminal.compareAndSet(false, true)) result.completeExceptionally(failure);
@@ -110,6 +128,9 @@ public class CoordinatedFallbackStore implements BatchRateLimitStore, RecoveryCo
     private final RecoveryPrimary primary;
     private final RecoverySettings settings;
     private final List<DegradationListener> listeners;
+    private final List<io.quotaflow.core.execution.CallbackDispatcher> callbacks;
+    private final java.util.concurrent.locks.ReentrantLock observationLock = new java.util.concurrent.locks.ReentrantLock();
+    private final Set<Configuration> configurations = ConcurrentHashMap.newKeySet();
     private final LongSupplier clock;
     private final RecoveryTracking tracking;
     private final LocalPolicyBindings localBindings = new LocalPolicyBindings();
@@ -138,7 +159,10 @@ public class CoordinatedFallbackStore implements BatchRateLimitStore, RecoveryCo
     public CoordinatedFallbackStore(RecoveryPrimary primary, RecoverySettings settings,
                                     List<DegradationListener> listeners, LongSupplier clock) {
         this.primary = Objects.requireNonNull(primary, "primary"); this.settings = Objects.requireNonNull(settings, "settings");
-        this.listeners = List.copyOf(listeners); this.clock = Objects.requireNonNull(clock, "clock");
+        this.listeners = List.copyOf(listeners);
+        this.callbacks = this.listeners.stream().map(listener -> new io.quotaflow.core.execution.CallbackDispatcher(
+                1024, Duration.ofSeconds(1), listener::onClosed)).toList();
+        this.clock = Objects.requireNonNull(clock, "clock");
         tracking = new RecoveryTracking(settings.maximumTrackedBuckets()); inFlight = new Semaphore(settings.maximumInFlight());
         notifyTransition(DegradationState.CLOSED, DegradationState.OPEN, "recovery ownership is not yet validated");
     }
@@ -176,8 +200,17 @@ public class CoordinatedFallbackStore implements BatchRateLimitStore, RecoveryCo
             if (DegradedShare.of(limit, settings.cohort().size()).capacity() == 0 && diagnostics.add(policy.id()))
                 log.warn("policy '{}' has no positive degraded share for the declared cohort", policy.id());
         });
-        long revision = configuration.get() == null ? 0 : revisions.incrementAndGet();
-        configuration.set(new Configuration(source, revision));
+        long revision;
+        observationLock.lock();
+        try {
+            if (closed.get()) return CompletableFuture.failedFuture(new IllegalStateException("recovery owner is closed"));
+            revision = configuration.get() == null ? 0 : revisions.incrementAndGet();
+            var next = new Configuration(source, revision, policies); configurations.add(next);
+            var previous = configuration.getAndSet(next);
+            long publishedRevision = next.revision; Set<String> publishedPolicies = next.policies;
+            notifyListeners(listener -> listener.onConfiguration(publishedRevision, publishedPolicies));
+            if (previous != null) { previous.retired = true; previous.retireIfDrained(); }
+        } finally { observationLock.unlock(); }
         for (QuotaDomain identity : source.domains()) domains.computeIfAbsent(identity, key -> new Domain(key, revision));
         for (Domain domain : domains.values()) {
             while (true) {
@@ -561,87 +594,108 @@ public class CoordinatedFallbackStore implements BatchRateLimitStore, RecoveryCo
     }
 
     @Override public CompletionStage<ChainResult> tryAcquireAll(List<LevelRequest> chain) {
+        Configuration cfg;
+        observationLock.lock();
+        try {
+            if (closed.get()) return CompletableFuture.completedFuture(ChainResult.rejected(0, 0, 0));
+            cfg = configuration.get();
+            if (cfg == null) throw new PolicyConfigurationException("recovery configuration is absent");
+            cfg.owners.incrementAndGet();
+        } finally { observationLock.unlock(); }
+        var result = new CompletableFuture<ChainResult>();
+        try {
+            acquireObserved(chain, cfg).whenComplete((value, failure) -> {
+                cfg.release();
+                if (failure == null) result.complete(value); else result.completeExceptionally(failure);
+            });
+        } catch (RuntimeException | Error failure) { cfg.release(); throw failure; }
+        return result;
+    }
+    private CompletionStage<ChainResult> acquireObserved(List<LevelRequest> chain, Configuration cfg) {
         List<LevelRequest> requests = List.copyOf(chain); LevelRequest.validateChain(requests);
         if (closed.get()) return CompletableFuture.completedFuture(ChainResult.rejected(0, 0, 0));
         if (enrollmentFailure != null) return CompletableFuture.failedFuture(enrollmentFailure);
         Domain domain = domains.get(requests.get(0).storageKey().domain());
         if (domain == null) throw new PolicyConfigurationException("recovery domain has not been configured");
         if (domain.incompatible != null) return CompletableFuture.failedFuture(domain.incompatible);
-        Route route = domain.route.get(); Configuration cfg = configuration.get();
+        Route route = domain.route.get();
         String fingerprint = cfg.source.domains().contains(domain.identity) ? cfg.source.fingerprint(domain.identity) : null;
-        if (fingerprint == null) return CompletableFuture.completedFuture(fallback(requests, ChainResult.rejected(0, 0, 0)));
+        if (fingerprint == null) return CompletableFuture.completedFuture(fallback(cfg, requests, ChainResult.rejected(0, 0, 0)));
         if (route.target == null || route.revision != cfg.revision)
-            return CompletableFuture.completedFuture(fallback(requests, pending(domain)));
+            return CompletableFuture.completedFuture(fallback(cfg, requests, pending(domain)));
         if (domain.blockedTarget != null && domain.blockedTarget.equals(route.target.configuration(route.revision))) {
-            quiesce(domain, route); return CompletableFuture.completedFuture(fallback(requests, pending(domain)));
+            quiesce(domain, route); return CompletableFuture.completedFuture(fallback(cfg, requests, pending(domain)));
         }
         for (int i = 0; i < requests.size(); i++) {
             LevelRequest request = requests.get(i);
             if (request.weight() > request.limit().capacity()) return CompletableFuture.completedFuture(ChainResult.rejected(i, 0, 0));
             if (request.configurationFingerprint() != null && !request.configurationFingerprint().equals(fingerprint))
-                return CompletableFuture.completedFuture(fallback(requests, pending(domain)));
-            if (!route.target.active(request.storageKey())) return CompletableFuture.completedFuture(fallback(requests, ChainResult.rejected(i, 0, 0)));
+                return CompletableFuture.completedFuture(fallback(cfg, requests, pending(domain)));
+            if (!route.target.active(request.storageKey())) return CompletableFuture.completedFuture(fallback(cfg, requests, ChainResult.rejected(i, 0, 0)));
             if (request.resolverRevision() != route.target.resolverRevision()
                     || !request.resolverFingerprint().equals(route.target.resolverFingerprint())) {
                 if (request.resolverRevision() > route.target.resolverRevision()) quiesce(domain, route);
-                return CompletableFuture.completedFuture(fallback(requests, pending(domain)));
+                return CompletableFuture.completedFuture(fallback(cfg, requests, pending(domain)));
             }
             if (request.resolverRevision() > 0 && request.resolverRevision() < Math.max(domain.localResolver.revision(), domain.seenResolver.revision())) {
-                quiesce(domain, route); return CompletableFuture.completedFuture(fallback(requests, pending(domain)));
+                quiesce(domain, route); return CompletableFuture.completedFuture(fallback(cfg, requests, pending(domain)));
             }
             var effective = route.target.resolve(request.storageKey(), request.keyGroup(), null);
-            if (effective.isEmpty()) return CompletableFuture.completedFuture(fallback(requests, ChainResult.rejected(i, 0, 0)));
+            if (effective.isEmpty()) return CompletableFuture.completedFuture(fallback(cfg, requests, ChainResult.rejected(i, 0, 0)));
             if (effective.orElseThrow().capacity() != request.limit().capacity()
                     || effective.orElseThrow().emissionIntervalNanos() != request.limit().emissionIntervalNanos())
                 throw new PolicyConfigurationException("request limit differs from its captured recovery target");
             if (!approved.contains(PolicyBinding.of(request.storageKey(), request.algorithm())))
-                return CompletableFuture.completedFuture(fallback(requests, pending(domain)));
+                return CompletableFuture.completedFuture(fallback(cfg, requests, pending(domain)));
         }
         if (route.mode != Mode.NORMAL && route.mode != Mode.LOCAL && route.mode != Mode.GUARDED)
-            return CompletableFuture.completedFuture(fallback(requests, pending(domain)));
+            return CompletableFuture.completedFuture(fallback(cfg, requests, pending(domain)));
         boolean guarded = route.mode != Mode.NORMAL;
         if (guarded && !route.ledger.normalizedFor(route.target)) {
-            quiesce(domain, route); return CompletableFuture.completedFuture(fallback(requests, pending(domain)));
+            quiesce(domain, route); return CompletableFuture.completedFuture(fallback(cfg, requests, pending(domain)));
         }
         if (guarded) for (int i = 0; i < requests.size(); i++) {
             LevelRequest request = requests.get(i);
             if (!DegradedShare.of(request.limit(), settings.cohort().size()).canFit(request.weight())) {
                 if (diagnostics.add(request.storageKey().policyId())) log.warn("policy '{}' has no usable degraded share for this weight", request.storageKey().policyId());
-                return CompletableFuture.completedFuture(fallback(requests, ChainResult.rejected(i, 0, 0)));
+                ChainResult rejected = ChainResult.rejected(i, 0, 0);
+                if (DegradedShare.of(request.limit(), settings.cohort().size()).capacity() == 0)
+                    rejected = rejected.withBudgets(List.of(new LevelBudget(i, new StoreBudget(0, 0, true))));
+                return CompletableFuture.completedFuture(fallback(cfg, requests, rejected));
             }
         }
         List<RecoveryTracking.Entry> entries = tracking.retain(requests, clock.getAsLong(), cfg.revision);
         if (entries == null) {
             if (trackingPressureReported.compareAndSet(false, true)) log.warn("recovery tracking capacity reached; new quota identities are being rejected");
-            return CompletableFuture.completedFuture(fallback(requests, ChainResult.rejected(0, 0, 0)));
+            return CompletableFuture.completedFuture(fallback(cfg, requests, ChainResult.rejected(0, 0, 0)));
         }
-        if (domain.route.get() != route) { entries.forEach(tracking::release); return CompletableFuture.completedFuture(fallback(requests, pending(domain))); }
+        if (domain.route.get() != route) { entries.forEach(tracking::release); return CompletableFuture.completedFuture(fallback(cfg, requests, pending(domain))); }
         ChainResult localGrant = null;
         if (guarded) {
             Ledger ledger = route.ledger; ledger.entrants.incrementAndGet();
             try {
                 if (domain.route.get() != route || ledger.retired.get()) {
-                    entries.forEach(tracking::release); return CompletableFuture.completedFuture(fallback(requests, pending(domain)));
+                    entries.forEach(tracking::release); return CompletableFuture.completedFuture(fallback(cfg, requests, pending(domain)));
                 }
                 ledger.pin(entries);
                 List<LevelRequest> scaled = requests.stream().map(request -> new LevelRequest(request.storageKey(),
                         DegradedShare.of(request.limit(), settings.cohort().size()).localLimit().orElseThrow(), request.algorithm(),
                         request.weight(), request.keyGroup())).toList();
-                ChainResult local = ledger.local.tryAcquireAll(scaled).toCompletableFuture().join();
+                ChainResult local = ledger.local.tryAcquireAll(scaled).toCompletableFuture().join().asDegraded();
                 localGrant = local;
                 if (!local.acquired() || route.mode == Mode.LOCAL) {
                     entries.forEach(tracking::release);
-                    return CompletableFuture.completedFuture(fallback(requests, domain.route.get() == route ? local : pending(domain)));
+                    return CompletableFuture.completedFuture(fallback(cfg, requests, domain.route.get() == route ? local : pending(domain)));
                 }
             } finally { ledger.entrants.decrementAndGet(); }
         }
         if (!inFlight.tryAcquire()) {
             if (dispatchPressureReported.compareAndSet(false, true)) log.warn("primary attempt capacity reached; new dispatches are being rejected");
             entries.forEach(tracking::release);
-            return CompletableFuture.completedFuture(fallback(requests, ChainResult.rejected(0, 0, 0)));
+            return CompletableFuture.completedFuture(fallback(cfg, requests, ChainResult.rejected(0, 0, 0)));
         }
         ChainResult capturedGuard = localGrant;
-        Attempt attempt = new Attempt(domain, route, entries, requests); attempts.put(attempt, Boolean.TRUE);
+        Attempt attempt = new Attempt(domain, route, entries, requests, cfg); attempts.put(attempt, Boolean.TRUE);
         if (closed.get()) {
             attempt.finish(ChainResult.rejected(0, 0, 0), false); attempt.release(); return attempt.result.copy();
         }
@@ -683,23 +737,36 @@ public class CoordinatedFallbackStore implements BatchRateLimitStore, RecoveryCo
     }
     @Override public CompletionStage<StoreResult> tryAcquireAsync(BucketIdentity key, Limit limit, Algorithm algorithm, long weight) {
         return tryAcquireAll(List.of(new LevelRequest(key, limit, algorithm, weight))).thenApply(result ->
-                new StoreResult(result.acquired(), result.remaining(), result.retryAfterMillis(), result.recoveryPending()));
+                result.singleResult());
     }
 
     private static ChainResult guardedOutcome(Ledger ledger, List<LevelRequest> requests, ChainResult local, ChainResult primary) {
-        if (primary.acquired()) return ChainResult.acquired(primary.firedLevelIndex(), Math.min(local.remaining(), primary.remaining()));
+        if (primary.acquired()) {
+            var budgets = new java.util.ArrayList<LevelBudget>();
+            for (LevelBudget guard : local.budgets()) {
+                var remote = primary.budgets().stream().filter(value -> value.level() == guard.level()).findFirst();
+                remote.ifPresent(value -> budgets.add(new LevelBudget(guard.level(), new StoreBudget(guard.budget().capacity(),
+                        Math.min(guard.budget().remaining(), value.budget().remaining()), true))));
+            }
+            return ChainResult.acquired(primary.firedLevelIndex(), Math.min(local.remaining(), primary.remaining())).withBudgets(budgets);
+        }
+        var budgets = new java.util.ArrayList<LevelBudget>();
         long retry = primary.retryAfterMillis(), remaining = primary.remaining();
         for (int i = 0; i < requests.size(); i++) {
             LevelRequest request = requests.get(i);
             var state = ledger.local.inspect(request.storageKey()).orElse(null);
             if (state == null) return ChainResult.rejected(primary.firedLevelIndex(), 0, 0);
             if (i == primary.firedLevelIndex()) remaining = Math.min(remaining, state.remaining());
+            int index = i;
+            primary.budgets().stream().filter(value -> value.level() == index).findFirst().ifPresent(value ->
+                    budgets.add(new LevelBudget(index, new StoreBudget(state.limit().capacity(),
+                            Math.min(state.remaining(), value.budget().remaining()), true))));
             if (retry > 0 && state.remaining() < request.weight()) {
                 long nanos = (request.weight() - state.remaining()) * state.limit().emissionIntervalNanos();
                 retry = Math.max(retry, nanos / 1_000_000 + (nanos % 1_000_000 == 0 ? 0 : 1));
             }
         }
-        return ChainResult.rejected(primary.firedLevelIndex(), remaining, retry);
+        return ChainResult.rejected(primary.firedLevelIndex(), remaining, retry).withBudgets(budgets);
     }
 
     private void localAfterFailure(Domain domain, Route captured, List<RecoveryTracking.Entry> entries) {
@@ -821,17 +888,29 @@ public class CoordinatedFallbackStore implements BatchRateLimitStore, RecoveryCo
             consumed = stateNotifications.addAndGet(-consumed);
         } while (consumed != 0);
     }
+    private void notifyListeners(java.util.function.Consumer<DegradationListener> event) {
+        for (int i = 0; i < listeners.size(); i++) {
+            var listener = listeners.get(i); callbacks.get(i).submit(() -> event.accept(listener));
+        }
+    }
+    public CompletionStage<Void> flushObservations() {
+        return CompletableFuture.allOf(callbacks.stream().map(io.quotaflow.core.execution.CallbackDispatcher::barrier).toArray(CompletableFuture[]::new));
+    }
+    public long observationFailures() { return callbacks.stream().mapToLong(io.quotaflow.core.execution.CallbackDispatcher::failures).sum(); }
     private void notifyTransition(DegradationState from, DegradationState to, String reason) {
         log.warn("degradation state changed from {} to {}: {}", from, to, reason);
-        for (DegradationListener listener : listeners) try { listener.onTransition(from, to, reason); }
-        catch (RuntimeException failure) { log.warn("degradation listener failed ({})", failure.getClass().getSimpleName()); }
+        notifyListeners(listener -> listener.onTransition(from, to, reason));
     }
-    private ChainResult fallback(List<LevelRequest> chain, ChainResult result) {
+    private ChainResult fallback(Configuration cfg, List<LevelRequest> chain, ChainResult result) {
         if (closed.get()) return ChainResult.rejected(result.firedLevelIndex(), 0, 0);
         LevelRequest fired = chain.get(result.firedLevelIndex());
-        for (DegradationListener listener : listeners) try {
-            listener.onFallbackDecision(fired.storageKey().policyId(), fired.keyGroup(), result.acquired() ? Verdict.ALLOWED : Verdict.REJECTED);
-        } catch (RuntimeException failure) { log.warn("fallback listener failed ({})", failure.getClass().getSimpleName()); }
+        String fingerprint = fired.configurationFingerprint();
+        boolean currentTarget = cfg.policies.contains(fired.storageKey().policyId())
+                && cfg.source.domains().contains(fired.storageKey().domain())
+                && (fingerprint == null || fingerprint.equals(cfg.source.fingerprint(fired.storageKey().domain())));
+        long revision = cfg.revision; String policyId = fired.storageKey().policyId(), group = fired.keyGroup();
+        Verdict verdict = result.acquired() ? Verdict.ALLOWED : Verdict.REJECTED;
+        notifyListeners(listener -> listener.onFallbackDecision(revision, currentTarget, policyId, group, verdict));
         return result;
     }
     private static Throwable unwrap(Throwable failure) {
@@ -853,5 +932,11 @@ public class CoordinatedFallbackStore implements BatchRateLimitStore, RecoveryCo
             attempt.finish(ChainResult.rejected(0, 0, 0), false); attempt.release();
         }
         updateState();
+        observationLock.lock();
+        try {
+            var current = configuration.get();
+            if (current != null) { current.retired = true; current.retireIfDrained(); }
+            if (configurations.isEmpty()) callbacks.forEach(io.quotaflow.core.execution.CallbackDispatcher::close);
+        } finally { observationLock.unlock(); }
     }
 }

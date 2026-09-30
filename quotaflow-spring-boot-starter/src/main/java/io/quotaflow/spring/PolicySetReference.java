@@ -1,7 +1,5 @@
 package io.quotaflow.spring;
 
-import io.quotaflow.config.ConfigSource;
-import io.quotaflow.config.ConfigurationParser;
 import io.quotaflow.core.PolicySet;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
@@ -21,9 +19,8 @@ final class PolicySetReference implements Supplier<PolicySet> {
         reference.set(Objects.requireNonNull(policySet, "policySet"));
     }
 
-    /** Re-parses the source payload; only invoked after the reloader applied it successfully. */
-    void refreshFrom(ConfigSource source) {
-        set(ConfigurationParser.parse(source.load()).policySet());
+    void initialize(PolicySet policySet) {
+        reference.compareAndSet(null, Objects.requireNonNull(policySet, "policySet"));
     }
 
     @Override

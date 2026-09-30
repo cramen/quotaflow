@@ -64,6 +64,8 @@ class MetricCardinalityTckTest {
         flow.tryAcquire("limited", tenant("acme"));
         flow.tryAcquire("limited", tenant("acme"));
 
+        flow.flushObservations().toCompletableFuture().join();
+        assertEquals(0, flow.observationFailures());
         int metersAfterFirstWave = registry.getMeters().size();
         int bound = POLICIES * KEY_GROUPS * RESULTS * METER_KINDS;
         assertTrue(metersAfterFirstWave <= bound,
@@ -74,6 +76,8 @@ class MetricCardinalityTckTest {
         for (int i = DISTINCT_KEYS; i < 2 * DISTINCT_KEYS; i++) {
             flow.tryAcquire("per-tenant", tenant("tenant-" + i));
         }
+        flow.flushObservations().toCompletableFuture().join();
+        assertEquals(0, flow.observationFailures());
         assertEquals(metersAfterFirstWave, registry.getMeters().size(),
                 "fresh raw keys must not create new meters");
 
@@ -90,6 +94,9 @@ class MetricCardinalityTckTest {
         }
         assertEquals(Set.of("global", "tenant"), keyGroupValues,
                 "only aggregated key-group identities may appear in tags");
+        flow.close();
+        flow.flushObservations().toCompletableFuture().join();
+        registry.close();
     }
 
     private static RateLimitContext tenant(String tenantId) {

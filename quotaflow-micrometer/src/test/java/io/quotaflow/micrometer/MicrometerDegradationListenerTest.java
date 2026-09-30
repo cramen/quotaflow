@@ -42,11 +42,14 @@ class MicrometerDegradationListenerTest {
             var flow = io.quotaflow.core.DefaultQuotaFlow.builder(policies, store).build();
             await(() -> degraded(registry) == 0);
             flow.tryAcquire("policy", io.quotaflow.core.RateLimitContext.empty());
+            store.flushObservations().toCompletableFuture().orTimeout(2, java.util.concurrent.TimeUnit.SECONDS).join();
             assertEquals(0, fallbackDecisions(registry));
             primary.available = false;
             flow.tryAcquire("policy", io.quotaflow.core.RateLimitContext.empty());
+            store.flushObservations().toCompletableFuture().orTimeout(2, java.util.concurrent.TimeUnit.SECONDS).join();
             assertEquals(1, degraded(registry)); assertEquals(1, fallbackDecisions(registry));
             flow.tryAcquire("policy", io.quotaflow.core.RateLimitContext.empty());
+            store.flushObservations().toCompletableFuture().orTimeout(2, java.util.concurrent.TimeUnit.SECONDS).join();
             assertEquals(2, fallbackDecisions(registry));
             primary.available = true;
             await(() -> degraded(registry) == 0);

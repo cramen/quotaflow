@@ -8,13 +8,13 @@ groups:
       # Utilization above 0.8 for five minutes: headroom is shrinking and
       # rejections are likely to follow.
       - alert: QuotaflowHighUtilization
-        expr: max by (policy, key_group) (quotaflow_utilization) > 0.8
+        expr: max by (policy) (quotaflow_utilization) > 0.8
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "Quota {{ $labels.policy }}/{{ $labels.key_group }} above 80% utilization"
-          description: "The {{ $labels.policy }} quota for key-group {{ $labels.key_group }} has stayed above 80% utilization for 5 minutes."
+          summary: "Quota {{ $labels.policy }} above 80% utilization"
+          description: "The sampled {{ $labels.policy }} utilization has stayed above 80% utilization for 5 minutes."
 
       # Degradation lasting longer than two minutes: decisions are served by
       # the conservative local fallback, not the distributed store.
@@ -33,10 +33,10 @@ groups:
         expr: |
           sum by (policy) (rate(quotaflow_decisions_total{result="reject"}[5m]))
             > 2 * sum by (policy) (rate(quotaflow_decisions_total{result="reject"}[5m] offset 1h))
-          and sum by (policy) (rate(quotaflow_decisions_total[5m]))
-            > 0.8 * sum by (policy) (rate(quotaflow_decisions_total[5m] offset 1h))
-          and sum by (policy) (rate(quotaflow_decisions_total[5m]))
-            < 1.25 * sum by (policy) (rate(quotaflow_decisions_total[5m] offset 1h))
+          and sum by (policy) (rate(quotaflow_decisions_total{result=~"allow|reject"}[5m]))
+            > 0.8 * sum by (policy) (rate(quotaflow_decisions_total{result=~"allow|reject"}[5m] offset 1h))
+          and sum by (policy) (rate(quotaflow_decisions_total{result=~"allow|reject"}[5m]))
+            < 1.25 * sum by (policy) (rate(quotaflow_decisions_total{result=~"allow|reject"}[5m] offset 1h))
         for: 10m
         labels:
           severity: warning

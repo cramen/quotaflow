@@ -66,12 +66,12 @@ import org.springframework.util.ClassUtils;
         })
 @ConditionalOnProperty(name = "quotaflow.enabled", havingValue = "true", matchIfMissing = true)
 @EnableConfigurationProperties(QuotaFlowProperties.class)
-public class QuotaFlowAutoConfiguration {
+public class QuotaFlowAutoConfiguration implements org.springframework.beans.factory.BeanClassLoaderAware {
 
     private static final Logger log = LoggerFactory.getLogger(QuotaFlowAutoConfiguration.class);
 
-    private static final boolean LETTUCE_PRESENT =
-            ClassUtils.isPresent("io.lettuce.core.RedisClient", QuotaFlowAutoConfiguration.class.getClassLoader());
+    private ClassLoader beanClassLoader = QuotaFlowAutoConfiguration.class.getClassLoader();
+    @Override public void setBeanClassLoader(ClassLoader loader) { beanClassLoader = loader; }
 
     private final PolicySetReference policySets = new PolicySetReference();
 
@@ -89,7 +89,8 @@ public class QuotaFlowAutoConfiguration {
     @Bean(destroyMethod = "close")
     @ConditionalOnMissingBean(RateLimitStore.class)
     ReconnectingRecoveryPrimary quotaFlowPrimaryStore(QuotaFlowProperties properties) {
-        if (!LETTUCE_PRESENT && properties.isFailOnRedisMissing())
+        boolean driverPresent = ClassUtils.isPresent("io.lettuce.core.RedisClient", beanClassLoader);
+        if (!driverPresent && properties.isFailOnRedisMissing())
             throw new IllegalStateException("Redis driver is absent and quotaflow.fail-on-redis-missing=true");
         var capturedEndpoint = new QuotaFlowProperties.Redis();
         capturedEndpoint.setUrl(properties.getRedis().getUrl());
@@ -98,7 +99,7 @@ public class QuotaFlowAutoConfiguration {
         capturedEndpoint.setBusinessTimeout(properties.getRedis().getBusinessTimeout());
         String capturedNamespace = properties.getNamespace();
         ReconnectingRecoveryPrimary primary = new ReconnectingRecoveryPrimary(() -> {
-            if (!LETTUCE_PRESENT) throw new io.quotaflow.core.store.PrimaryDispatchException(
+            if (!driverPresent) throw new io.quotaflow.core.store.PrimaryDispatchException(
                     io.quotaflow.core.store.PrimaryDispatchException.Outcome.NOT_DISPATCHED);
             return RedisStoreFactory.recoveryConnection(capturedEndpoint, capturedNamespace);
         }, capturedEndpoint.getConnectTimeout());
@@ -107,7 +108,8 @@ public class QuotaFlowAutoConfiguration {
             catch (RuntimeException failure) {
                 primary.close();
                 // Endpoint URLs and nested driver failures may contain credentials.
-                throw new IllegalStateException("Redis is unavailable and quotaflow.fail-on-redis-missing=true; verify the driver and endpoint");
+                throw new IllegalStateException("Redis is unavailable and quotaflow.fail-on-redis-missing=true at "
+                        + io.quotaflow.store.redis.SafeRedisDiagnostics.endpoint(capturedEndpoint.getUrl()) + "; verify credentials, TLS and driver configuration");
             }
         }
         return primary;
@@ -142,8 +144,10 @@ public class QuotaFlowAutoConfiguration {
     DefaultQuotaFlow quotaFlow(
             QuotaFlowConfiguration configuration, RateLimitStore store, QuotaFlowProperties properties,
             ObjectProvider<DecisionListener> decisionListeners,
-            ObjectProvider<MeterRegistry> meterRegistry,
+            ObjectProvider<io.quotaflow.core.WaitListener> waitListeners,
+            ObjectProvider<io.quotaflow.core.observation.ObservationListener> observationListeners,
             ObjectProvider<LimitResolver> limitResolvers) {
+        policySets.initialize(configuration.policySet());
         DefaultQuotaFlow.Builder builder = DefaultQuotaFlow.builder(configuration.policySet(), store)
                 .namespace(properties.getNamespace())
                 .maxWaitersPerPolicy(properties.getMaxWaitersPerPolicy())
@@ -151,14 +155,17 @@ public class QuotaFlowAutoConfiguration {
                 .addResolver(KeyResolvers.TENANT_ID_ID, KeyResolvers.tenantId())
                 .addResolver(KeyResolvers.API_KEY_ID, KeyResolvers.apiKey());
         decisionListeners.orderedStream().forEach(builder::addListener);
-        meterRegistry.ifAvailable(registry -> {
-            LimitResolver resolver = limitResolvers.getIfAvailable();
-            builder.addListener(resolver != null
-                    ? MicrometerDecisionListener.withLimitResolver(registry, policySets, resolver)
-                    : MicrometerDecisionListener.withStaticLimits(registry, policySets));
-        });
+        waitListeners.orderedStream().forEach(builder::addWaitListener);
+        observationListeners.orderedStream().forEach(builder::addObservationListener);
         limitResolvers.ifAvailable(builder::limitResolver);
         return builder.build();
+    }
+
+    @Bean(destroyMethod = "close")
+    @ConditionalOnBean(MeterRegistry.class)
+    @ConditionalOnMissingBean(MicrometerDecisionListener.class)
+    MicrometerDecisionListener quotaFlowDecisionMetrics(MeterRegistry registry) {
+        return new MicrometerDecisionListener(registry);
     }
 
     /** TTL-caching wrapper for a user-provided tariff resolver. */
@@ -173,7 +180,7 @@ public class QuotaFlowAutoConfiguration {
 
     /** Throttle queue depth gauges, kept in sync with every applied reload. */
     @Bean
-    @ConditionalOnBean(MeterRegistry.class)
+    @ConditionalOnBean({MeterRegistry.class, DefaultQuotaFlow.class})
     @ConditionalOnMissingBean
     MicrometerThrottleMetrics quotaFlowThrottleMetrics(MeterRegistry registry, DefaultQuotaFlow quotaFlow) {
         return new MicrometerThrottleMetrics(registry, quotaFlow, policySets);
@@ -192,7 +199,7 @@ public class QuotaFlowAutoConfiguration {
         return ConfigReloader.builder(source, quotaFlow)
                 .startupAccounting(configuration.accounting())
                 .pollInterval(properties.getReload().getPollInterval())
-                .onApplied(() -> policySets.refreshFrom(source))
+                .onApplied(() -> policySets.set(quotaFlow.policySet()))
                 .onApplied(() -> cachingResolver.ifAvailable(CachingLimitResolver::clear))
                 .onApplied(() -> throttleMetrics.ifAvailable(MicrometerThrottleMetrics::sync))
                 .build();
@@ -201,7 +208,8 @@ public class QuotaFlowAutoConfiguration {
     /** Annotation interceptor; replace with an own bean to customize context seeding. */
     @Bean
     @ConditionalOnMissingBean
-    RateLimitInterceptor rateLimitInterceptor(QuotaFlow quotaFlow) {
+    RateLimitInterceptor rateLimitInterceptor(QuotaFlow quotaFlow, QuotaFlowConfiguration configuration) {
+        policySets.initialize(configuration.policySet());
         return new RateLimitInterceptor(quotaFlow, policySets);
     }
 

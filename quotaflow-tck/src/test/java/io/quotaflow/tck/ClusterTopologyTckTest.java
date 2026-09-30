@@ -268,6 +268,8 @@ class ClusterTopologyTckTest {
 
     @Test
     void migrationAssessmentIncludesEveryPrimaryShard() throws Exception {
+        // Administration requires a current topology, including roles assigned after startup.
+        clusterClient.reloadPartitions();
         try (var connection = clusterClient.connect()) {
             var admin = new io.quotaflow.store.redis.RedisNamespaceAdmin(connection);
             var primaries = admin.primaryIds();

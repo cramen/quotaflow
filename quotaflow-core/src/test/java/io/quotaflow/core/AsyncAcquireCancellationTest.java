@@ -75,6 +75,7 @@ class AsyncAcquireCancellationTest {
                 .addListener((decision, keyGroup) -> events.add(decision))
                 .build();
         assertTrue(flow.tryAcquire("t", RateLimitContext.empty()).isAllowed());
+        flow.flushObservations().toCompletableFuture().orTimeout(2, TimeUnit.SECONDS).join();
         assertEquals(1, events.size(), "the draining acquisition emitted its event");
         CompletableFuture<Decision> waiting = flow
                 .acquireAsync("t", RateLimitContext.empty(), 1, Duration.ofSeconds(30))

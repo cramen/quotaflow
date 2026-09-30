@@ -19,16 +19,18 @@ import java.lang.annotation.Target;
  * <p>The evaluated key feeds the well-known context attribute matching the
  * policy's scope (tenant id for tenant scope, principal for user scope, API
  * key for key scope); parent chain levels resolve from the security principal
- * and their own resolvers as usual. When the expression is blank or evaluates
- * to {@code null}/blank, {@link #onMissingKey()} decides: reject (the default)
- * or fall back to the policy's configured default key. A missing key never
- * means an unconditional allow.
+ * and their own resolvers as usual. An omitted USER key uses the authenticated,
+ * non-anonymous principal; GLOBAL requires no identity. An explicit expression
+ * is authoritative: a null/blank result follows {@link #onMissingKey()} and
+ * never silently substitutes authentication. Other missing identities reject
+ * unless a configured default is explicitly selected.
  *
  * <p>Rejection surfaces as a {@link RateLimitExceededException} carrying the
  * decision; the auto-configured web handlers map it to HTTP 429 with
- * {@code Retry-After} and a problem+json body. Methods returning
+ * {@code Retry-After} only when a safe positive refill schedule exists, and a problem+json body. Methods returning
  * {@code Mono}/{@code Flux} are limited and throttled without blocking the
- * event loop; all other return types use the blocking path (servlet workers
+ * event loop, resolving authentication and cloning invocation state independently
+ * for every subscription; all other return types use the blocking path (servlet workers
  * and virtual threads).
  *
  * <p>Standard Spring AOP caveats apply: the advice runs through the proxy, so

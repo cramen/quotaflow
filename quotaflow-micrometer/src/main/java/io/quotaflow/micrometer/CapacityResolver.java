@@ -3,11 +3,12 @@ package io.quotaflow.micrometer;
 import java.util.OptionalLong;
 
 /**
- * Supplies the capacity used as the denominator of the
- * {@code quotaflow.utilization} gauge for one (policy, key-group) pair. An
- * empty result means the capacity is unknown (for example an unresolvable
- * dynamic limit); the gauge then keeps its last value.
+ * Legacy capacity callback retained for source compatibility.
+ * Budget gauges now consume paired effective capacity/remaining observations;
+ * metric adapters never invoke this callback to reconstruct a decision.
+ * @deprecated Use observation metadata from the evaluated store result.
  */
+@Deprecated
 @FunctionalInterface
 public interface CapacityResolver {
 

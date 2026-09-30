@@ -1,5 +1,6 @@
 plugins {
     `java-library`
+    alias(libs.plugins.jmh)
 }
 
 java {
@@ -42,4 +43,14 @@ dependencies {
 
 tasks.withType<Test> {
     useJUnitPlatform()
+}
+
+// Diagnostic runs include real observation delivery; comparison needs a reviewed matching baseline.
+jmh {
+    benchmarkParameters.put("algorithm", objects.listProperty(String::class.java).value(listOf(providers.gradleProperty("benchmarkAlgorithm").orElse("TOKEN_BUCKET").get())))
+    fork = 1
+    warmupIterations = 2
+    iterations = 3
+    resultFormat.set("JSON")
+    resultsFile.set(layout.buildDirectory.file("reports/jmh/results.json"))
 }

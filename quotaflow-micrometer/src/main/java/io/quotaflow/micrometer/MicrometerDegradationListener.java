@@ -1,47 +1,46 @@
 package io.quotaflow.micrometer;
 
-import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.quotaflow.core.Verdict;
-import io.quotaflow.fallback.DegradationListener;
-import io.quotaflow.fallback.DegradationState;
-import java.util.Objects;
-import java.util.concurrent.atomic.AtomicInteger;
+import io.quotaflow.fallback.*;
+import java.util.*;
 
-/**
- * Bridges degradation events to Micrometer: a {@code quotaflow.degraded}
- * gauge holding 1 while the primary store is not trusted ({@code OPEN} or
- * {@code HALF_OPEN} — during probing all non-probe traffic is still served
- * locally) and 0 while {@code CLOSED}, plus a
- * {@code quotaflow.fallback.decisions} counter tagged with policy and
- * key-group.
- *
- * <p>Register one instance per {@code FallbackRateLimitStore}; the single-
- * store case is the norm and yields exactly one gauge per registry.
- */
-public final class MicrometerDegradationListener implements DegradationListener {
-
-    private final MeterRegistry registry;
-    private final AtomicInteger degraded = new AtomicInteger(0);
-
+/** One owner per fallback store. Shared registries report degraded when any live owner is degraded. */
+public final class MicrometerDegradationListener implements DegradationListener, AutoCloseable {
+    private final SharedMeters meters;
+    private final Object stateOwner = new Object(), manualOwner = new Object();
+    private final Map<Long,Object> generations = new HashMap<>();
+    private boolean closed;
     public MicrometerDegradationListener(MeterRegistry registry) {
-        this.registry = Objects.requireNonNull(registry, "registry");
-        Gauge.builder(QuotaFlowMetrics.DEGRADED, degraded, AtomicInteger::get)
-                .description("1 while the distributed store is degraded and decisions are served locally")
-                .register(registry);
+        meters=SharedMeters.of(Objects.requireNonNull(registry,"registry"));
+        meters.degradation(stateOwner,1);
     }
-
-    @Override
-    public void onTransition(DegradationState from, DegradationState to, String reason) {
-        degraded.set(to == DegradationState.CLOSED ? 0 : 1);
+    @Override public synchronized void onTransition(DegradationState from,DegradationState to,String reason) {
+        if(!closed) meters.degradation(stateOwner,to==DegradationState.CLOSED?0:1);
     }
-
-    @Override
-    public void onFallbackDecision(String policyId, String keyGroup, Verdict verdict) {
-        registry.counter(
-                        QuotaFlowMetrics.FALLBACK_DECISIONS,
-                        QuotaFlowMetrics.TAG_POLICY, policyId,
-                        QuotaFlowMetrics.TAG_KEY_GROUP, keyGroup)
-                .increment();
+    @Override public synchronized void onConfiguration(long revision,Set<String> policies) {
+        if(!closed) generations.computeIfAbsent(revision,ignored->new Object());
+    }
+    @Override public synchronized void onFallbackDecision(long revision,boolean currentTarget,String policy,String group,Verdict verdict) {
+        if(closed) return;
+        var owner=generations.get(revision); if(owner==null) return;
+        if(currentTarget) meters.fallback(owner,policy,group);
+        else {
+            var transientOwner=new Object();
+            try { meters.fallback(transientOwner,policy,group); }
+            finally { meters.release(transientOwner); }
+        }
+    }
+    @Override public synchronized void onFallbackDecision(String policy,String group,Verdict verdict) {
+        if(!closed) meters.fallback(manualOwner,policy,group);
+    }
+    @Override public synchronized void onRetired(long revision) {
+        var owner=generations.remove(revision); if(owner!=null) meters.release(owner);
+    }
+    @Override public void onClosed() { close(); }
+    @Override public synchronized void close() {
+        if(closed) return; closed=true;
+        for(var owner:generations.values()) meters.release(owner);
+        generations.clear(); meters.release(manualOwner); meters.removeDegradation(stateOwner);
     }
 }

@@ -28,4 +28,15 @@ public interface DegradationListener {
      * @param keyGroup the aggregated key-group identity, never the raw key
      */
     void onFallbackDecision(String policyId, String keyGroup, Verdict verdict);
+
+    /** Published configuration membership; revisions are scoped to this store owner. */
+    default void onConfiguration(long revision, java.util.Set<String> policies) { }
+    /** Contextual form. Non-current requests can be counted without retaining obsolete series. */
+    default void onFallbackDecision(long revision, boolean currentTarget, String policyId, String keyGroup, Verdict verdict) {
+        onFallbackDecision(policyId, keyGroup, verdict);
+    }
+    /** All operations admitted under the retired revision have completed their observations. */
+    default void onRetired(long revision) { }
+    /** This store owner has stopped producing events. */
+    default void onClosed() { }
 }

@@ -97,7 +97,7 @@ public final class LocalRateLimitStore implements BatchRateLimitStore {
         LevelRequest request = new LevelRequest(key, limit, algorithm, weight);
         bindings.register(key, algorithm);
         ChainResult result = acquire(List.of(request));
-        return new StoreResult(result.acquired(), result.remaining(), result.retryAfterMillis(), result.recoveryPending());
+        return result.singleResult();
     }
 
     @Override
@@ -138,6 +138,7 @@ public final class LocalRateLimitStore implements BatchRateLimitStore {
             int fired = impossible >= 0 ? impossible : rejected;
             Node next = previous.root;
             long remaining = Long.MAX_VALUE;
+            List<LevelBudget> budgets = new java.util.ArrayList<>(chain.size());
             for (int i = 0; i < chain.size(); i++) {
                 LevelRequest level = chain.get(i);
                 Cell state = states[i];
@@ -148,14 +149,15 @@ public final class LocalRateLimitStore implements BatchRateLimitStore {
                     next = put(next, level.storageKey(), state);
                 }
                 remaining = Math.min(remaining, state.tokens);
+                budgets.add(new LevelBudget(i, new StoreBudget(state.limit.capacity(), state.tokens, false)));
             }
             beforeCommit.run();
             if (!domain.compareAndSet(previous, new Version(next, previous.admissionGeneration, previous.pending, previous.fenceGeneration))) continue;
-            if (fired < 0) return ChainResult.acquired(chain.size() - 1, remaining);
+            if (fired < 0) return ChainResult.acquired(chain.size() - 1, remaining).withBudgets(budgets);
             Cell state = states[fired];
             long retry = impossible >= 0 ? 0 : millisCeil(
                     (chain.get(fired).weight() - state.tokens) * state.limit.emissionIntervalNanos() - state.remainder);
-            return ChainResult.rejected(fired, state.tokens, retry);
+            return ChainResult.rejected(fired, state.tokens, retry).withBudgets(budgets);
         }
     }
 

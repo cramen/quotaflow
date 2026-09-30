@@ -119,12 +119,9 @@ public class RedisRateLimitStore implements BatchRateLimitStore, StateSeeder, Au
             return connectOnce(url, config, connectTimeout);
         } catch (LinkageError e) {
             RedisClientFactory.disableNativeTransports();
-            throw new IllegalStateException("Redis client initialization failed with a linkage error ("
-                    + e + "), indicating a broken netty native-transport mix on the classpath; both"
-                    + " native transports (" + RedisClientFactory.EPOLL_PROPERTY + ", "
-                    + RedisClientFactory.KQUEUE_PROPERTY + ") have been set to false, so newly created"
-                    + " clients in this JVM use NIO — or align the netty native-transport jars with the"
-                    + " netty core version", e);
+            throw SafeRedisDiagnostics.failure(url, e);
+        } catch (RuntimeException failure) {
+            throw SafeRedisDiagnostics.failure(url, failure);
         }
     }
 
@@ -246,7 +243,7 @@ public class RedisRateLimitStore implements BatchRateLimitStore, StateSeeder, Au
     @Override public CompletionStage<StoreResult> tryAcquireAsync(
             BucketIdentity storageKey, Limit limit, Algorithm algorithm, long weight) {
         return tryAcquireAll(List.of(new LevelRequest(storageKey, limit, algorithm, weight))).thenApply(result ->
-                new StoreResult(result.acquired(), result.remaining(), result.retryAfterMillis(), result.recoveryPending()));
+                result.singleResult());
     }
     @Override public CompletionStage<ChainResult> tryAcquireAll(List<LevelRequest> chain) {
         List<LevelRequest> requests = List.copyOf(chain); LevelRequest.validateChain(requests);
@@ -286,7 +283,7 @@ public class RedisRateLimitStore implements BatchRateLimitStore, StateSeeder, Au
         }
         return evalRegistered(guardedChain, keys.toArray(String[]::new), args.toArray(String[]::new),
                 requests.stream().map(r -> PolicyBinding.of(r.storageKey(), r.algorithm())).toList())
-                .thenApply(reply -> number(reply, 0) == -20 ? ChainResult.pending(0, pending) : toChainResult(reply));
+                .thenApply(reply -> number(reply, 0) == -20 ? ChainResult.pending(0, pending) : toChainResult(reply, requests.size()));
     }
 
     /** A stale context returns false without normalizing or writing any bucket. */
@@ -391,14 +388,18 @@ public class RedisRateLimitStore implements BatchRateLimitStore, StateSeeder, Au
         return acquired ? StoreResult.acquired(remaining) : StoreResult.rejected(remaining, retryAfterMillis);
     }
 
-    private static ChainResult toChainResult(java.util.List<Object> reply) {
+    private static ChainResult toChainResult(java.util.List<Object> reply, int levels) {
+        if (reply.size() != 4 + 2 * levels) throw new io.quotaflow.core.store.StateCompatibilityException("invalid chain budget reply shape");
+        var budgets = new java.util.ArrayList<io.quotaflow.core.store.LevelBudget>(levels);
+        for (int i = 0; i < levels; i++) budgets.add(new io.quotaflow.core.store.LevelBudget(i,
+                new io.quotaflow.core.store.StoreBudget(number(reply, 4 + 2 * i), number(reply, 5 + 2 * i), false)));
         boolean acquired = number(reply, 0) == 1;
         int firedLevelIndex = (int) number(reply, 1);
         long remaining = number(reply, 2);
         long retryAfterMillis = number(reply, 3);
-        return acquired
+        return (acquired
                 ? ChainResult.acquired(firedLevelIndex, remaining)
-                : ChainResult.rejected(firedLevelIndex, remaining, retryAfterMillis);
+                : ChainResult.rejected(firedLevelIndex, remaining, retryAfterMillis)).withBudgets(budgets);
     }
 
     private static long number(java.util.List<Object> reply, int index) {

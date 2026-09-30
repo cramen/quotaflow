@@ -30,7 +30,7 @@ class DefaultQuotaFlowTest {
 
     @Test
     void rejectionIsReturnedAsDataNotThrown() {
-        QuotaFlow quotaFlow = DefaultQuotaFlow.builder(
+        DefaultQuotaFlow quotaFlow = DefaultQuotaFlow.builder(
                         PolicySet.compile(List.of(userPolicy("u", 1))), store)
                 .build();
         assertTrue(quotaFlow.tryAcquire("u", principal("alice")).isAllowed());
@@ -43,7 +43,7 @@ class DefaultQuotaFlowTest {
     void listenersFireForAllowAndRejectWithKeyGroupOnly() {
         List<Decision> decisions = new CopyOnWriteArrayList<>();
         List<String> keyGroups = new CopyOnWriteArrayList<>();
-        QuotaFlow quotaFlow = DefaultQuotaFlow.builder(
+        DefaultQuotaFlow quotaFlow = DefaultQuotaFlow.builder(
                         PolicySet.compile(List.of(userPolicy("u", 1))), store)
                 .addListener((decision, keyGroup) -> {
                     decisions.add(decision);
@@ -52,6 +52,7 @@ class DefaultQuotaFlowTest {
                 .build();
         quotaFlow.tryAcquire("u", principal("alice"));
         quotaFlow.tryAcquire("u", principal("alice"));
+        quotaFlow.flushObservations().toCompletableFuture().orTimeout(2, java.util.concurrent.TimeUnit.SECONDS).join();
         assertEquals(List.of(Verdict.ALLOWED, Verdict.REJECTED),
                 decisions.stream().map(Decision::verdict).toList());
         assertEquals(List.of("principal", "principal"), keyGroups);
@@ -62,25 +63,27 @@ class DefaultQuotaFlowTest {
     @Test
     void listenerReceivesUnresolvableGroupForMissingKey() {
         List<String> keyGroups = new CopyOnWriteArrayList<>();
-        QuotaFlow quotaFlow = DefaultQuotaFlow.builder(
+        DefaultQuotaFlow quotaFlow = DefaultQuotaFlow.builder(
                         PolicySet.compile(List.of(userPolicy("u", 1))), store)
                 .addListener((decision, keyGroup) -> keyGroups.add(keyGroup))
                 .build();
         Decision decision = quotaFlow.tryAcquire("u", RateLimitContext.empty());
         assertFalse(decision.isAllowed());
+        quotaFlow.flushObservations().toCompletableFuture().orTimeout(2, java.util.concurrent.TimeUnit.SECONDS).join();
         assertEquals(List.of("unresolvable"), keyGroups);
     }
 
     @Test
     void asyncAcquireFiresListeners() {
         List<Decision> decisions = new CopyOnWriteArrayList<>();
-        QuotaFlow quotaFlow = DefaultQuotaFlow.builder(
+        DefaultQuotaFlow quotaFlow = DefaultQuotaFlow.builder(
                         PolicySet.compile(List.of(userPolicy("u", 5))), store)
                 .addListener((decision, keyGroup) -> decisions.add(decision))
                 .build();
         Decision decision = quotaFlow.tryAcquireAsync("u", principal("alice"), 2)
                 .toCompletableFuture().join();
         assertTrue(decision.isAllowed());
+        quotaFlow.flushObservations().toCompletableFuture().orTimeout(2, java.util.concurrent.TimeUnit.SECONDS).join();
         assertEquals(1, decisions.size());
         assertEquals(3, decisions.get(0).remaining());
     }
@@ -98,12 +101,13 @@ class DefaultQuotaFlowTest {
                         .scope(Scope.GLOBAL)
                         .build()));
         List<String> keyGroups = new CopyOnWriteArrayList<>();
-        QuotaFlow quotaFlow = DefaultQuotaFlow.builder(set, store)
+        DefaultQuotaFlow quotaFlow = DefaultQuotaFlow.builder(set, store)
                 .defaultResolver(KeyResolvers.scopeBased())
                 .addResolver(KeyResolvers.PRINCIPAL_ID, KeyResolvers.principal())
                 .addListener((decision, keyGroup) -> keyGroups.add(keyGroup))
                 .build();
         assertTrue(quotaFlow.tryAcquire("u", principal("alice")).isAllowed());
+        quotaFlow.flushObservations().toCompletableFuture().orTimeout(2, java.util.concurrent.TimeUnit.SECONDS).join();
         assertEquals(List.of("principal"), keyGroups);
         assertTrue(quotaFlow.tryAcquire("g", RateLimitContext.empty()).isAllowed());
     }

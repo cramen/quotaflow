@@ -43,6 +43,20 @@ class QuotaFlowAutoConfigurationTest {
             .withPropertyValues(POLICY);
 
     @Test
+    void customFacadeWithRegistryOmitsUnsupportedAuxiliaryMetrics() {
+        runner.withUserConfiguration(UserFacadeConfiguration.class, MetricsConfiguration.class).run(context -> {
+            assertThat(context).hasNotFailed();
+            assertThat(context).doesNotHaveBean(MicrometerThrottleMetrics.class);
+        });
+    }
+
+    @Test
+    void optionalSecurityTracingAndWebLibrariesCanBeAbsent() {
+        runner.withClassLoader(new FilteredClassLoader("org.springframework.security", "org.springframework.web", "jakarta.servlet", "io.micrometer.tracing"))
+                .withUserConfiguration(UserStoreConfiguration.class).run(context -> assertThat(context).hasNotFailed());
+    }
+
+    @Test
     void assemblesFullStackByDefault() {
         runner.run(context -> {
             assertThat(context)
@@ -122,6 +136,7 @@ class QuotaFlowAutoConfigurationTest {
             RateLimitContext alice =
                     RateLimitContext.builder().put(RateLimitContext.PRINCIPAL, "alice").build();
             flow.tryAcquire("user-api", alice);
+            ((io.quotaflow.core.DefaultQuotaFlow) flow).flushObservations().toCompletableFuture().join();
 
             MeterRegistry registry = context.getBean(MeterRegistry.class);
             assertThat(registry.get("quotaflow.decisions")

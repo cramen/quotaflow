@@ -6,7 +6,10 @@ public final class QuotaFlowMetrics {
     /** Counter of limiter decisions, tagged by result, policy and key-group. */
     public static final String DECISIONS = "quotaflow.decisions";
 
-    /** Last-value gauge (0..1) of consumed capacity per policy and key-group. */
+    /** Minimum latest sampled remaining budget per policy. */
+    public static final String TOKENS_REMAINING = "quotaflow.tokens.remaining";
+
+    /** Maximum latest sampled utilization (0..1) per policy. */
     public static final String UTILIZATION = "quotaflow.utilization";
 
     /** Gauge holding 1 while the store is degraded, 0 while healthy. */
@@ -15,7 +18,7 @@ public final class QuotaFlowMetrics {
     /** Counter of decisions served by the local fallback while degraded. */
     public static final String FALLBACK_DECISIONS = "quotaflow.fallback.decisions";
 
-    /** Histogram of time spent waiting in throttle queues (zero-wait included). */
+    /** Histogram of terminal API-entry elapsed duration for queued/timed-out positive calls (zero-wait included). */
     public static final String WAIT_DURATION = "quotaflow.wait.duration";
 
     /** Gauge of throttle waiter queue depth per policy. */
@@ -28,6 +31,7 @@ public final class QuotaFlowMetrics {
     public static final String TAG_POLICY = "policy";
     public static final String TAG_KEY_GROUP = "key-group";
 
+    public static final String RESULT_WAIT = "wait";
     public static final String RESULT_ALLOW = "allow";
     public static final String RESULT_REJECT = "reject";
 

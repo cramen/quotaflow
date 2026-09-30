@@ -52,7 +52,9 @@ public final class RedisClientFactory {
         Objects.requireNonNull(connectTimeout, "connectTimeout");
         Objects.requireNonNull(commandTimeout, "commandTimeout");
         disableIncompleteNativeTransports();
-        RedisClient client = RedisClient.create(url);
+        RedisClient client;
+        try { client = RedisClient.create(new DiagnosticRedisURI(io.lettuce.core.RedisURI.create(url))); }
+        catch (RuntimeException failure) { throw SafeRedisDiagnostics.failure(url, failure); }
         client.setOptions(ClientOptions.builder()
                 .socketOptions(SocketOptions.builder().connectTimeout(connectTimeout).build())
                 .disconnectedBehavior(ClientOptions.DisconnectedBehavior.REJECT_COMMANDS)
@@ -61,6 +63,52 @@ public final class RedisClientFactory {
                 .timeoutOptions(TimeoutOptions.enabled(commandTimeout))
                 .build());
         return client;
+    }
+
+    /** URI copies used by the driver must not render userinfo through a static credentials provider. */
+    private static final class DiagnosticRedisURI extends io.lettuce.core.RedisURI {
+        DiagnosticRedisURI(io.lettuce.core.RedisURI source) {
+            super(source);
+            var provider = source.getCredentialsProvider();
+            if (provider != null) setCredentialsProvider(new SafeCredentialsProvider(provider));
+            getSentinels().replaceAll(DiagnosticRedisURI::new);
+        }
+        @Override public String toString() {
+            String host = getHost();
+            if (host == null || !host.matches("[a-zA-Z0-9.\\[\\]:_-]+")) host = "configured-hosts";
+            return (isSsl() ? "rediss" : "redis") + "://" + host + ":" + getPort()
+                    + (getSentinels().isEmpty() ? " (standalone)" : " (sentinel)");
+        }
+    }
+    private static final class SafeCredentialsProvider implements io.lettuce.core.RedisCredentialsProvider {
+        private final io.lettuce.core.RedisCredentialsProvider delegate;
+        SafeCredentialsProvider(io.lettuce.core.RedisCredentialsProvider delegate) { this.delegate = delegate; }
+        @Override public reactor.core.publisher.Mono<io.lettuce.core.RedisCredentials> resolveCredentials() {
+            return reactor.core.publisher.Mono.defer(delegate::resolveCredentials).map(SafeCredentials::new)
+                    .cast(io.lettuce.core.RedisCredentials.class)
+                    .onErrorMap(failure -> new IllegalStateException("Redis credentials unavailable"));
+        }
+        @Override public boolean supportsStreaming() { return delegate.supportsStreaming(); }
+        @Override public reactor.core.publisher.Flux<io.lettuce.core.RedisCredentials> credentials() {
+            return reactor.core.publisher.Flux.defer(delegate::credentials).map(SafeCredentials::new)
+                    .cast(io.lettuce.core.RedisCredentials.class)
+                    .onErrorMap(failure -> new IllegalStateException("Redis credentials unavailable"));
+        }
+        @Override public String toString() { return "RedisCredentialsProvider[redacted]"; }
+    }
+    private static final class SafeCredentials implements io.lettuce.core.RedisCredentials {
+        private final String username;
+        private final char[] password;
+        private final boolean hasUsername, hasPassword;
+        SafeCredentials(io.lettuce.core.RedisCredentials value) {
+            username = value.getUsername(); hasUsername = value.hasUsername(); hasPassword = value.hasPassword();
+            var password = value.getPassword(); this.password = password == null ? null : password.clone();
+        }
+        @Override public String getUsername() { return username; }
+        @Override public boolean hasUsername() { return hasUsername; }
+        @Override public char[] getPassword() { return password == null ? null : password.clone(); }
+        @Override public boolean hasPassword() { return hasPassword; }
+        @Override public String toString() { return "RedisCredentials[redacted]"; }
     }
 
     /** Applies the incomplete-transport detection against the module's own classloader. */
