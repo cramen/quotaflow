@@ -49,6 +49,8 @@ public CompletionStage<Answer> chat(String tenantId, Prompt prompt) { ... }
 
 Provision the namespace, fixed cohort and root controllers before activation; see
 [conservative recovery and the single-owner setup](docs/conservative-recovery.md).
+For deadline, cancellation and resolver execution settings, see
+[acquisition lifecycle](docs/acquisition-lifecycle.md).
 
 An exhausted limit produces `429 Too Many Requests` with a `Retry-After`
 header and an `application/problem+json` body naming the policy and the fired

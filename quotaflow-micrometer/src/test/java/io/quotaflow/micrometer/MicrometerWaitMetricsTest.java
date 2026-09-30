@@ -76,16 +76,22 @@ class MicrometerWaitMetricsTest {
     }
 
     @Test
-    void waitTimeoutsAreCountedPerPolicyAndKeyGroup() {
+    void waitTimeoutsAreCountedPerPolicyAndKeyGroup() throws Exception {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         PolicySet policies = PolicySet.compile(List.of(throttlePolicy("t", 1, 1, Duration.ofMinutes(1))));
+        var delivered = new java.util.concurrent.CountDownLatch(1);
         DefaultQuotaFlow flow = DefaultQuotaFlow.builder(policies, new LocalRateLimitStore())
                 .addListener(MicrometerDecisionListener.withStaticLimits(registry, () -> policies))
+                .addListener((decision, group) -> {
+                    if (decision.throttleRejection().isPresent()) delivered.countDown();
+                })
                 .build();
 
         flow.tryAcquire("t", RateLimitContext.empty());
         flow.acquire("t", RateLimitContext.empty(), 1, Duration.ofMillis(120));
 
+        // Deadline finalization is independent of asynchronous telemetry delivery.
+        assertTrue(delivered.await(2, TimeUnit.SECONDS));
         assertEquals(1.0, registry.get(QuotaFlowMetrics.WAIT_TIMEOUTS)
                 .tags("policy", "t", "key-group", "global").counter().count());
         // the timeout is also visible as an ordinary rejected decision

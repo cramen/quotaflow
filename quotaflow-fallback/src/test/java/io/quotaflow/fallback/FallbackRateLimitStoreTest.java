@@ -163,7 +163,8 @@ class FallbackRateLimitStoreTest {
             var flow = DefaultQuotaFlow.builder(policies, store).build();
             await(() -> store.state() == DegradationState.CLOSED); primary.available = false;
             flow.tryAcquire("quota", RateLimitContext.empty()); flow.tryAcquire("quota", RateLimitContext.empty());
-            var attempt = worker.submit(() -> flow.tryAcquire("quota", RateLimitContext.empty()));
+            // Exercise the guard directly: facade calls now isolate SPI invocation on bounded workers.
+            var attempt = worker.submit(() -> new PolicyEngine(store).evaluate(policies, "quota", RateLimitContext.empty(), 1));
             assertTrue(entered.await(2, TimeUnit.SECONDS)); primary.available = true;
             Thread.sleep(200);
             assertEquals(0, primary.seeds.get(), "a stalled entrant cannot be omitted from final accounting");

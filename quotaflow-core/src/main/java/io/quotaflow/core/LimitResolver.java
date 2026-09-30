@@ -11,8 +11,9 @@ import java.util.Optional;
  * <p>The hook is consulted exactly once per resolution; production wiring is
  * expected to place a TTL cache in front of expensive resolvers so the hot
  * path performs no external calls. Resolver implementations should be fast
- * in-memory lookups; blocking external calls inside a resolver are the
- * resolver author's responsibility.
+ * in-memory lookups. The facade isolates legacy blocking implementations in
+ * bounded compatibility execution; uncooperative code can retain a worker until
+ * it exits. {@link AsyncLimitResolver} supports completion-based lookups.
  *
  * <p>Fenced Redis/coordinated dynamic policies require {@link VersionedLimitResolver}
  * so one complete view and its provider revision survive preflight and recovery.

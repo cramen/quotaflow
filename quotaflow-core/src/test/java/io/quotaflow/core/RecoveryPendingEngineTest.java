@@ -47,10 +47,10 @@ class RecoveryPendingEngineTest {
             }
         }
     }
-    @Test void facadeCurrentlyReturnsAnImmediateSchedulelessDecisionAndOneNotification() {
+    @Test void nonwaitingFacadeReturnsASchedulelessDecisionAndOneNotification() {
         var store = new PendingBatch(); var notifications = new AtomicInteger();
         var flow = DefaultQuotaFlow.builder(POLICIES, store).addListener((decision, group) -> notifications.incrementAndGet()).build();
-        var decision = flow.acquire("p", RateLimitContext.empty(), 1, Duration.ofSeconds(1));
+        var decision = flow.acquire("p", RateLimitContext.empty(), 1, Duration.ZERO);
         assertFalse(decision.isAllowed()); assertTrue(decision.retryAfter().isEmpty());
         assertEquals(Duration.ZERO, decision.waitDuration()); assertEquals(1, notifications.get());
         assertFalse(store.pending.get().readiness().toCompletableFuture().isDone());

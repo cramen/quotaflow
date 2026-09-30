@@ -1,471 +1,342 @@
 package io.quotaflow.core;
 
 import io.quotaflow.core.store.RateLimitStore;
+import io.quotaflow.core.execution.BoundedExecution;
+import io.quotaflow.core.execution.DeadlineScheduler;
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionStage;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executor;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.locks.LockSupport;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.LongSupplier;
+import java.util.function.BooleanSupplier;
 
 /**
- * Default {@link QuotaFlow} composing a policy set, key resolvers, a
- * {@link RateLimitStore} and {@link DecisionListener}s.
- *
- * <p>The compiled {@link PolicySet} is held in an {@link AtomicReference} and
- * read exactly once per decision, so {@link #replacePolicySet(PolicySet)}
- * swaps configuration atomically: every decision uses one consistent set,
- * never a mix of old and new. A swap also wakes queue heads for an immediate
- * re-evaluation, so a mid-wait limit increase can free waiters early; a
- * waiter whose policy vanished from the current set is rejected with a
- * configuration-shaped decision (no refill schedule).
- *
- * <p>Throttle is a retry loop above the engine, not an engine mode: when a
- * throttle-mode policy rejects with a refill schedule, the caller enqueues in
- * the policy's bounded priority waiter queue (strict priority, FIFO within a
- * priority, {@code maxWaitersPerPolicy} bound) and parks until the rejection's
- * retry-after plus &plusmn;10% jitter. Only the queue head retries, which is
- * what makes the priority order the service order; a lost retry re-queues the
- * waiter with the new retry-after while its wait timeout lasts. Overflow and
- * expired waits are data rejections carrying a {@link ThrottleRejection}
- * reason. Waiting uses {@link LockSupport#parkNanos} outside every lock, so
- * virtual-thread callers unmount rather than pin a carrier. Every final
- * decision fires exactly one listener event carrying the total wait duration.
- * Degradation is orthogonal: the same loop runs against whatever store the
- * engine holds, including the conservative local fallback.
- *
- * <p>Strict priority can starve low-priority waiters under sustained
- * oversubscription; the caller's wait timeout bounds the harm (starved
- * waiters eventually reject rather than hang). Priority aging is deliberately
- * not implemented. The waiter queue is in-memory and instance-local: the real
- * queue bound across a fleet is instances &times; maxWaitersPerPolicy, so the
- * bound should reflect downstream capacity divided by the expected instance
- * count.
- *
- * <p>Cancelling the {@link CompletionStage} returned by {@code acquireAsync}
- * abandons the wait: the waiter leaves its queue promptly (freeing the slot
- * for other callers), no quota is consumed and no listener event is fired
- * for the abandoned wait. Cancellation after the decision finalized has no
- * effect.
+ * Completion-driven quota acquisition. Positive budgets start at API entry;
+ * zero-wait calls perform one evaluation under the operational timeout.
+ * Waiters retain continuations and timers, never a parked library worker.
+ * Cancellation suppresses later admission and notification, but cannot undo an
+ * already dispatched store debit. Strict priority is FIFO within a priority;
+ * deadlines bound starvation. Listener callbacks must be fast and nonblocking.
  */
 public final class DefaultQuotaFlow implements QuotaFlow {
-
-    /** Wake-time de-correlation: retry-after is jittered by &plusmn;10%. */
-    private static final double JITTER = 0.10;
-
+    private static final Executor DELIVERY = Executors.newFixedThreadPool(2, task -> {
+        Thread thread = new Thread(task, "quotaflow-delivery");
+        thread.setDaemon(true); return thread;
+    });
     private final AtomicReference<PolicySet> policySets;
     private final PolicyEngine engine;
     private final List<DecisionListener> listeners;
+    private final List<WaitListener> waitListeners;
     private final int maxWaitersPerPolicy;
     private final Executor asyncExecutor;
+    private final BoundedExecution execution;
+    private final long operationNanos;
+    private final LongSupplier nanoClock;
     private final ConcurrentHashMap<String, WaiterQueue> queues = new ConcurrentHashMap<>();
     private final AtomicLong waiterSequences = new AtomicLong();
     private final AtomicLong configurationGeneration = new AtomicLong();
 
     private DefaultQuotaFlow(Builder builder) {
-        this.policySets = new AtomicReference<>(builder.policySet);
-        this.engine = new PolicyEngine(
-                builder.store, builder.defaultResolver, builder.namedResolvers, builder.limitResolver, builder.namespace);
-        this.engine.registerPolicies(builder.policySet).toCompletableFuture().join();
-        this.listeners = List.copyOf(builder.listeners);
-        this.maxWaitersPerPolicy = builder.maxWaitersPerPolicy;
-        this.asyncExecutor = builder.asyncExecutor != null ? builder.asyncExecutor : DefaultAsyncExecutor.get();
+        policySets = new AtomicReference<>(builder.policySet);
+        engine = new PolicyEngine(builder.store, builder.defaultResolver, builder.namedResolvers, builder.limitResolver, builder.namespace);
+        engine.registerPolicies(builder.policySet).toCompletableFuture().join();
+        listeners = List.copyOf(builder.listeners);
+        waitListeners = List.copyOf(builder.waitListeners);
+        maxWaitersPerPolicy = builder.maxWaitersPerPolicy;
+        execution = builder.execution; operationNanos = builder.operationTimeout.toNanos(); nanoClock = builder.nanoClock;
+        asyncExecutor = builder.asyncExecutor == null ? Runnable::run : builder.asyncExecutor;
+    }
+    public static Builder builder(PolicySet policies, RateLimitStore store) { return new Builder(policies, store); }
+    public void replacePolicySet(PolicySet policies) {
+        engine.registerPolicies(Objects.requireNonNull(policies, "policySet")).toCompletableFuture().join();
+        policySets.set(policies); configurationGeneration.incrementAndGet(); queues.values().forEach(WaiterQueue::signalHead);
+    }
+    public int waitQueueDepth(String policyId) { var queue = queues.get(policyId); return queue == null ? 0 : queue.size(); }
+    int retainedQueues() { return queues.size(); }
+    @Override public Decision tryAcquire(String id, RateLimitContext context) { return tryAcquire(id, context, 1); }
+    @Override public Decision tryAcquire(String id, RateLimitContext context, long weight) {
+        return acquire(id, context, weight, Duration.ZERO);
+    }
+    @Override public CompletionStage<Decision> tryAcquireAsync(String id, RateLimitContext context, long weight) {
+        return acquireAsync(id, context, weight, Duration.ZERO);
+    }
+    @Override public Decision acquire(String id, RateLimitContext context, long weight, Duration timeout) {
+        return synchronous(new Acquisition(id, context, weight, timeout, null));
+    }
+    @Override public Decision acquire(String id, RateLimitContext context, long weight, Duration timeout, int priority) {
+        return synchronous(new Acquisition(id, context, weight, timeout, priority));
+    }
+    @Override public CompletionStage<Decision> acquireAsync(String id, RateLimitContext context, long weight, Duration timeout) {
+        return asynchronous(new Acquisition(id, context, weight, timeout, null));
+    }
+    @Override public CompletionStage<Decision> acquireAsync(String id, RateLimitContext context, long weight, Duration timeout, int priority) {
+        return asynchronous(new Acquisition(id, context, weight, timeout, priority));
+    }
+    private CompletionStage<Decision> asynchronous(Acquisition acquisition) {
+        acquisition.armDeadline();
+        try { asyncExecutor.execute(acquisition::progress); }
+        catch (RejectedExecutionException failure) { acquisition.overflow(); }
+        catch (RuntimeException failure) { acquisition.fail(failure); }
+        return acquisition.result;
+    }
+    private Decision synchronous(Acquisition acquisition) {
+        acquisition.armDeadline(); acquisition.progress();
+        try { return acquisition.result.get(Math.max(1, acquisition.deadline - nanoClock.getAsLong()), TimeUnit.NANOSECONDS); }
+        catch (InterruptedException failure) {
+            acquisition.timeout(); Thread.currentThread().interrupt(); return acquisition.terminalDecision();
+        } catch (TimeoutException failure) {
+            acquisition.timeout(); return acquisition.terminalDecision();
+        } catch (ExecutionException failure) {
+            if (failure.getCause() instanceof RuntimeException runtime) throw runtime;
+            throw new CompletionException(failure.getCause());
+        }
     }
 
-    public static Builder builder(PolicySet policySet, RateLimitStore store) {
-        return new Builder(policySet, store);
+    private record Terminal(Decision decision, Throwable failure) { }
+
+    /** A completed public future retains its outcome, not the request, queues or owning limiter. */
+    private static final class AcquisitionFuture extends CompletableFuture<Decision> {
+        private final AtomicReference<BooleanSupplier> cancellation;
+        AcquisitionFuture(BooleanSupplier cancellation) { this.cancellation = new AtomicReference<>(cancellation); }
+        @Override public boolean cancel(boolean interrupt) {
+            var owner = cancellation.get();
+            return owner != null && owner.getAsBoolean() && super.cancel(interrupt);
+        }
+        void detach() { cancellation.set(null); }
     }
 
-    /** Atomically replaces the compiled policy set for subsequent decisions. */
-    public void replacePolicySet(PolicySet policySet) {
-        Objects.requireNonNull(policySet, "policySet");
-        engine.registerPolicies(policySet).toCompletableFuture().join();
-        policySets.set(policySet);
-        configurationGeneration.incrementAndGet();
-        queues.values().forEach(WaiterQueue::signalHead);
-    }
+    private final class Acquisition {
+        final String id;
+        final RateLimitContext context;
+        final long weight, start, deadline;
+        final boolean positive;
+        final RateLimitPolicy initial;
+        final int priority;
+        final AtomicReference<Terminal> terminal = new AtomicReference<>();
+        final ReentrantLock lock = new ReentrantLock();
+        final AcquisitionFuture result = new AcquisitionFuture(this::cancel);
 
-    /** Current waiter count of the policy's throttle queue (0 when none exists). */
-    public int waitQueueDepth(String policyId) {
-        WaiterQueue queue = queues.get(policyId);
-        return queue == null ? 0 : queue.size();
-    }
+        boolean cancel() {
+            lock.lock();
+            try { if (!terminal.compareAndSet(null, new Terminal(null, new CancellationException()))) return false; }
+            finally { lock.unlock(); }
+            cleanup(); return true;
+        }
+        Decision terminalDecision() {
+            var outcome = terminal.get();
+            if (outcome.failure() instanceof RuntimeException runtime) throw runtime;
+            if (outcome.failure() != null) throw new CompletionException(outcome.failure());
+            return outcome.decision();
+        }
+        volatile Evaluation last;
+        WaiterQueue queue;
+        WaiterQueue.Waiter waiter;
+        volatile boolean inFlight;
+        boolean ready = true;
+        volatile long attemptDeadline;
+        long attemptSequence;
+        volatile boolean queued;
+        long due, observedGeneration;
+        ScheduledFuture<?> deadlineTimer, retryTimer, operationTimer;
+        CompletableFuture<Void> notifications = CompletableFuture.completedFuture(null);
+        CompletableFuture<Void> readiness;
 
-    @Override
-    public Decision tryAcquire(String policyId, RateLimitContext context) {
-        return tryAcquire(policyId, context, 1);
-    }
-
-    @Override
-    public Decision tryAcquire(String policyId, RateLimitContext context, long weight) {
-        Evaluation evaluation = engine.evaluateInternal(policySets.get(), policyId, context, weight);
-        notifyListeners(evaluation.decision(), evaluation.keyGroup());
-        return evaluation.decision();
-    }
-
-    @Override
-    public CompletionStage<Decision> tryAcquireAsync(String policyId, RateLimitContext context, long weight) {
-        return engine
-                .evaluateInternalAsync(policySets.get(), policyId, context, weight)
-                .thenApply(evaluation -> {
-                    notifyListeners(evaluation.decision(), evaluation.keyGroup());
-                    return evaluation.decision();
-                });
-    }
-
-    @Override
-    public Decision acquire(String policyId, RateLimitContext context, long weight, Duration waitTimeout) {
-        return acquireInternal(policyId, context, weight, waitTimeout, null, null);
-    }
-
-    @Override
-    public Decision acquire(
-            String policyId, RateLimitContext context, long weight, Duration waitTimeout, int priority) {
-        return acquireInternal(policyId, context, weight, waitTimeout, priority, null);
-    }
-
-    @Override
-    public CompletionStage<Decision> acquireAsync(
-            String policyId, RateLimitContext context, long weight, Duration waitTimeout) {
-        validateAcquireArgs(weight, waitTimeout);
-        return acquireAsyncInternal(policyId, context, weight, waitTimeout, null);
-    }
-
-    @Override
-    public CompletionStage<Decision> acquireAsync(
-            String policyId, RateLimitContext context, long weight, Duration waitTimeout, int priority) {
-        validateAcquireArgs(weight, waitTimeout);
-        return acquireAsyncInternal(policyId, context, weight, waitTimeout, priority);
-    }
-
-    /**
-     * Runs the throttle loop on the async executor under an
-     * {@link AsyncAcquisition} handle. Cancelling the returned future removes
-     * the waiter from its queue promptly: the slot is freed for other callers,
-     * no quota is consumed and no listener event is fired for a decision that
-     * never finalized. Cancellation after normal completion has no effect.
-     */
-    private CompletionStage<Decision> acquireAsyncInternal(
-            String policyId, RateLimitContext context, long weight, Duration waitTimeout,
-            Integer priority) {
-        AsyncAcquisition acquisition = new AsyncAcquisition();
-        CompletableFuture<Decision> result = new CompletableFuture<>() {
-            @Override
-            public boolean cancel(boolean mayInterruptIfRunning) {
-                boolean cancelledNow = super.cancel(mayInterruptIfRunning);
-                if (cancelledNow) {
-                    acquisition.cancel();
-                }
-                return cancelledNow;
+        Acquisition(String id, RateLimitContext context, long weight, Duration timeout, Integer priority) {
+            start = nanoClock.getAsLong();
+            Limit.validateWeight(weight);
+            if (Objects.requireNonNull(timeout, "waitTimeout").isNegative()) throw new IllegalArgumentException("waitTimeout must not be negative");
+            this.id = id; this.context = Objects.requireNonNull(context, "context"); this.weight = weight;
+            initial = policySets.get().policy(id); this.priority = resolvePriority(priority, context, initial);
+            positive = !timeout.isZero(); deadline = start + (positive ? timeout.toNanos() : operationNanos);
+        }
+        void armDeadline() {
+            lock.lock();
+            try { if (terminal.get() == null) deadlineTimer = DeadlineScheduler.schedule(this::timeout, deadline - nanoClock.getAsLong()); }
+            finally { lock.unlock(); }
+        }
+        boolean active() {
+            if (terminal.get() != null) return false;
+            if (nanoClock.getAsLong() - deadline >= 0) { timeout(); return false; }
+            if (inFlight && nanoClock.getAsLong() - attemptDeadline >= 0) {
+                operationExpired(attemptSequence); return false;
             }
-        };
-        asyncExecutor.execute(() -> {
-            acquisition.attach(Thread.currentThread());
+            return true;
+        }
+        void operationExpired(long sequence) {
+            Evaluation evaluation = new Evaluation(Decision.rejectedWithoutSchedule(id, initial.scope()), "unresolvable");
+            Decision decision;
+            lock.lock();
             try {
-                if (!acquisition.isCancelled()) {
-                    result.complete(
-                            acquireInternal(policyId, context, weight, waitTimeout, priority, acquisition));
-                }
-            } catch (AcquisitionCancelledException e) {
-                // the future is already cancelled and the waiter left its queue
-                // silently; nothing remains to complete
-            } catch (Throwable failure) {
-                result.completeExceptionally(failure);
-            } finally {
-                // never return a thread with a pending interrupt to the pool
-                Thread.interrupted();
-            }
-        });
-        return result;
-    }
-
-    /**
-     * The throttle retry loop. A rejected acquisition against a throttle-mode
-     * policy with a refill schedule joins the policy's waiter queue and parks
-     * until its wake time; only the queue head re-evaluates. Every loop
-     * iteration re-reads the current policy set, so hot-reloaded limits and
-     * swapped reaction modes govern mid-wait retries.
-     *
-     * <p>When running under an {@link AsyncAcquisition} (the {@code acquireAsync}
-     * path), cancellation of the caller's future unwinds the loop by throwing
-     * {@link AcquisitionCancelledException}: the waiter leaves the queue and no
-     * decision is finalized, so no quota is consumed and no listener event
-     * fires for the abandoned wait.
-     */
-    private Decision acquireInternal(
-            String policyId, RateLimitContext context, long weight, Duration waitTimeout,
-            Integer priority, AsyncAcquisition acquisition) {
-        validateAcquireArgs(weight, waitTimeout);
-        long startNanos = System.nanoTime();
-        // wraparound-safe: the deadline is only ever used in nano differences
-        long deadlineNanos = startNanos + waitTimeout.toNanos();
-        WaiterQueue queue = null;
-        WaiterQueue.Waiter waiter = null;
-        Evaluation lastEvaluation = null;
-        RateLimitPolicy lastPolicy = null;
-        while (true) {
-            if (acquisition != null && acquisition.isCancelled()) {
+                if (!inFlight || sequence != attemptSequence || terminal.get() != null) return;
+                if (nanoClock.getAsLong() - deadline >= 0) evaluation = timeoutEvaluation();
+                decision = claimLocked(evaluation, nanoClock.getAsLong() - deadline >= 0);
+            } finally { lock.unlock(); }
+            if (decision != null) publish(decision, evaluation.keyGroup());
+        }
+        void progress() {
+            if (!active()) return;
+            PolicySet policies;
+            lock.lock();
+            try {
+                if (terminal.get() != null || inFlight) return;
                 if (waiter != null) {
-                    queue.remove(waiter);
+                    if (!queue.isHead(waiter)) return;
+                    boolean changed = observedGeneration != configurationGeneration.get();
+                    if (!changed && !ready) return;
+                    if (!changed && due - nanoClock.getAsLong() > 0) {
+                        if (retryTimer != null) retryTimer.cancel(false);
+                        retryTimer = DeadlineScheduler.schedule(this::progress, due - nanoClock.getAsLong());
+                        return;
+                    }
                 }
-                throw new AcquisitionCancelledException();
-            }
-            PolicySet current = policySets.get();
-            Evaluation evaluation;
+                attemptDeadline = nanoClock.getAsLong() + Math.min(operationNanos, Math.max(0, deadline - nanoClock.getAsLong()));
+                attemptSequence++;
+                inFlight = true;
+                if (retryTimer != null) { retryTimer.cancel(false); retryTimer = null; }
+                if (readiness != null) { readiness.cancel(false); readiness = null; }
+                policies = policySets.get(); observedGeneration = configurationGeneration.get();
+            } finally { lock.unlock(); }
             RateLimitPolicy policy;
+            try { policy = policies.policy(id); }
+            catch (PolicyConfigurationException removed) {
+                complete(new Evaluation(Decision.rejectedWithoutSchedule(id, initial.scope()), last == null ? "unresolvable" : last.keyGroup()), false); return;
+            }
+            lock.lock();
             try {
-                policy = current.policy(policyId);
-                evaluation = engine.evaluateInternal(current, policyId, context, weight);
-            } catch (PolicyConfigurationException e) {
+                if (terminal.get() != null) return;
+                if (positive && operationNanos < deadline - nanoClock.getAsLong())
+                    { long sequence = attemptSequence;
+                      operationTimer = DeadlineScheduler.schedule(() -> operationExpired(sequence), operationNanos); }
+            } finally { lock.unlock(); }
+            engine.evaluateInternalAsync(policies, id, context, weight, execution, this::active)
+                    .whenComplete((evaluation, failure) -> {
+                        lock.lock();
+                        try { if (operationTimer != null) { operationTimer.cancel(false); operationTimer = null; } }
+                        finally { lock.unlock(); }
+                        if (!active()) return;
+                        if (failure != null) {
+                            while (failure instanceof CompletionException && failure.getCause() != null) failure = failure.getCause();
+                            if (failure instanceof RejectedExecutionException) overflow(); else fail(failure);
+                            return;
+                        }
+                        if (evaluation.decision().isAllowed() || policy.reaction() == Reaction.REJECT || !positive
+                                || (evaluation.decision().retryAfter().isEmpty() && evaluation.recoveryPending() == null)) {
+                            complete(evaluation, false); return;
+                        }
+                        enqueue(evaluation);
+                    });
+        }
+        void enqueue(Evaluation evaluation) {
+            boolean overflow = false;
+            CompletableFuture<Void> signal = null;
+            lock.lock();
+            try {
+                if (terminal.get() != null) return;
+                last = evaluation; inFlight = false;
                 if (waiter == null) {
-                    // unknown policy or broken chain configuration on the first
-                    // attempt: caller misuse, exactly like tryAcquire
-                    throw e;
+                    waiter = new WaiterQueue.Waiter(priority, waiterSequences.getAndIncrement(), this::progress);
+                    queues.compute(id, (key, current) -> {
+                        queue = current == null ? new WaiterQueue(maxWaitersPerPolicy) : current;
+                        queued = queue.offer(waiter); return queue;
+                    });
+                    if (!queued) { waiter = null; overflow = true; }
+                    else notifications = notifications.thenRunAsync(() -> {
+                        for (WaitListener listener : waitListeners) {
+                            try { listener.onQueued(id, evaluation.keyGroup()); }
+                            catch (RuntimeException failure) { logListenerFailure(failure); }
+                        }
+                    }, DELIVERY);
                 }
-                // the policy (or its chain configuration) vanished mid-wait:
-                // reject with a configuration-shaped decision (no refill schedule)
-                return finish(queue, waiter,
-                        Decision.rejectedWithoutSchedule(policyId, lastPolicy.scope()),
-                        lastEvaluation, startNanos);
+                ready = evaluation.recoveryPending() == null;
+                due = nanoClock.getAsLong() + evaluation.decision().retryAfter().map(Duration::toNanos).orElse(0L);
+                if (!ready && !overflow) { signal = evaluation.recoveryPending().readiness().toCompletableFuture(); readiness = signal; }
+            } finally { lock.unlock(); }
+            if (overflow) { overflow(false); return; }
+            if (signal != null) {
+                var captured = signal;
+                signal.whenComplete((ignored, failure) -> {
+                    lock.lock();
+                    try { if (readiness != captured || terminal.get() != null) return; ready = true; }
+                    finally { lock.unlock(); }
+                    progress();
+                });
             }
+            progress();
+        }
+        Evaluation timeoutEvaluation() {
+            var previous = last;
+            var decision = previous == null ? Decision.rejectedWithoutSchedule(id, initial.scope()) : previous.decision();
+            if (positive) decision = decision.withThrottleRejection(ThrottleRejection.WAIT_TIMEOUT);
+            return new Evaluation(decision, previous == null ? "unresolvable" : previous.keyGroup());
+        }
+        void timeout() { complete(timeoutEvaluation(), true); }
+        void overflow() { overflow(true); }
+        void overflow(boolean dispatchSaturated) {
+            var previous = last;
+            var decision = previous == null ? Decision.rejectedWithoutSchedule(id, initial.scope()) : previous.decision();
+            // Dispatch saturation has no trustworthy schedule; quota queue overflow retains the fired level.
+            if (dispatchSaturated && previous != null)
+                decision = Decision.rejectedWithoutSchedule(previous.decision().policyId(), previous.decision().scope());
+            if (positive && initial.reaction() == Reaction.THROTTLE) decision = decision.withThrottleRejection(ThrottleRejection.QUEUE_OVERFLOW);
+            complete(new Evaluation(decision, last == null ? "unresolvable" : last.keyGroup()), false);
+        }
+        void complete(Evaluation evaluation, boolean timeout) {
+            Decision decision;
+            lock.lock();
+            try {
+                if (!timeout && nanoClock.getAsLong() - deadline >= 0) { evaluation = timeoutEvaluation(); timeout = true; }
+                decision = claimLocked(evaluation, timeout);
+            } finally { lock.unlock(); }
+            if (decision != null) publish(decision, evaluation.keyGroup());
+        }
+        Decision claimLocked(Evaluation evaluation, boolean timeout) {
             Decision decision = evaluation.decision();
-            if (decision.isAllowed() || policy.reaction() == Reaction.REJECT) {
-                return finish(queue, waiter, decision, evaluation, startNanos);
-            }
-            if (decision.retryAfter().isEmpty()) {
-                // rejections without a refill schedule (missing key, unresolvable
-                // limit) have nothing to wait for
-                return finish(queue, waiter, decision, evaluation, startNanos);
-            }
-            lastEvaluation = evaluation;
-            lastPolicy = policy;
-            long now = System.nanoTime();
-            if (now - deadlineNanos >= 0) {
-                return finish(queue, waiter,
-                        decision.withThrottleRejection(ThrottleRejection.WAIT_TIMEOUT),
-                        evaluation, startNanos);
-            }
-            if (waiter == null) {
-                queue = queues.computeIfAbsent(policyId, id -> new WaiterQueue(maxWaitersPerPolicy));
-                waiter = new WaiterQueue.Waiter(
-                        resolvePriority(priority, context, policy),
-                        waiterSequences.getAndIncrement(),
-                        deadlineNanos,
-                        Thread.currentThread(),
-                        wakeAt(now, decision),
-                        configurationGeneration.get());
-                if (!queue.offer(waiter)) {
-                    return finish(null, null,
-                            decision.withThrottleRejection(ThrottleRejection.QUEUE_OVERFLOW),
-                            evaluation, startNanos);
+            if (queued || (positive && timeout)) decision = decision.withWait(Duration.ofNanos(Math.max(0, nanoClock.getAsLong() - start)));
+            return terminal.compareAndSet(null, new Terminal(decision, null)) ? decision : null;
+        }
+        void publish(Decision decision, String group) {
+            cleanup();
+            // User listeners and dependent future callbacks never execute on the deadline scheduler.
+            lock.lock();
+            try { notifications = notifications.thenRunAsync(() -> {
+                for (DecisionListener listener : listeners) {
+                    try { listener.onDecision(decision, group); }
+                    catch (RuntimeException failure) { logListenerFailure(failure); }
                 }
-                if (acquisition != null) {
-                    acquisition.register(queue, waiter);
-                    // cancellation may have landed between offer and register
-                    if (acquisition.isCancelled()) {
-                        queue.remove(waiter);
-                        throw new AcquisitionCancelledException();
-                    }
-                }
-            } else {
-                waiter.wakeAtNanos = wakeAt(now, decision);
-                waiter.generation = configurationGeneration.get();
-            }
-            if (!parkUntilDue(queue, waiter)) {
-                if (acquisition != null && acquisition.isCancelled()) {
-                    queue.remove(waiter);
-                    throw new AcquisitionCancelledException();
-                }
-                return finish(queue, waiter,
-                        decision.withThrottleRejection(ThrottleRejection.WAIT_TIMEOUT),
-                        evaluation, startNanos);
-            }
+                result.complete(decision);
+            }, DELIVERY); } finally { lock.unlock(); }
+        }
+        void fail(Throwable failure) {
+            lock.lock();
+            try { if (!terminal.compareAndSet(null, new Terminal(null, failure))) return; }
+            finally { lock.unlock(); }
+            cleanup(); DELIVERY.execute(() -> result.completeExceptionally(failure));
+        }
+        void cleanup() {
+            WaiterQueue owned; WaiterQueue.Waiter entry;
+            lock.lock();
+            try {
+                if (deadlineTimer != null) { deadlineTimer.cancel(false); deadlineTimer = null; }
+                if (operationTimer != null) { operationTimer.cancel(false); operationTimer = null; }
+                if (retryTimer != null) { retryTimer.cancel(false); retryTimer = null; }
+                if (readiness != null) { var detached = readiness; readiness = null; detached.cancel(false); }
+                owned = queue; entry = waiter; queue = null; waiter = null; last = null;
+                result.detach();
+            } finally { lock.unlock(); }
+            if (owned != null && entry != null) owned.remove(entry);
+            if (owned != null) queues.computeIfPresent(id, (key, current) -> current == owned && current.size() == 0 ? null : current);
         }
     }
-
-    /**
-     * Parks the calling thread until its waiter is due for a retry: it must be
-     * the queue head and its wake time must have passed (or the configuration
-     * changed since its last retry, in which case it re-evaluates immediately
-     * against the new set). Non-head waiters park until their deadline and
-     * rely on head-transition signals, which are never lost because
-     * {@link LockSupport#unpark} permits persist until consumed.
-     *
-     * <p>An interrupted thread stops waiting early: the interrupt status is
-     * preserved and the caller leaves the queue, which surfaces as a
-     * wait-timeout rejection.
-     *
-     * @return {@code true} when the waiter may retry, {@code false} when its
-     *         wait timeout expired (or the thread was interrupted) while queued
-     */
-    private boolean parkUntilDue(WaiterQueue queue, WaiterQueue.Waiter waiter) {
-        while (true) {
-            long now = System.nanoTime();
-            long remaining = waiter.deadlineNanos - now;
-            if (remaining <= 0) {
-                return false;
-            }
-            long parkFor;
-            if (queue.isHead(waiter)) {
-                boolean configurationChanged = waiter.generation != configurationGeneration.get();
-                long untilWake = waiter.wakeAtNanos - now;
-                if (untilWake <= 0 || configurationChanged) {
-                    return true;
-                }
-                parkFor = Math.min(untilWake, remaining);
-            } else {
-                parkFor = remaining;
-            }
-            LockSupport.parkNanos(parkFor);
-            if (Thread.interrupted()) {
-                Thread.currentThread().interrupt();
-                return false;
-            }
-        }
+    private static void logListenerFailure(RuntimeException failure) {
+        org.slf4j.LoggerFactory.getLogger(DefaultQuotaFlow.class).warn("quota listener failed", failure);
     }
-
-    /** Wake time: retry-after de-correlated by &plusmn;10% jitter. */
-    private static long wakeAt(long nowNanos, Decision rejection) {
-        long retryNanos = rejection.retryAfter().orElseThrow().toNanos();
-        double factor = 1.0 + ThreadLocalRandom.current().nextDouble(-JITTER, JITTER);
-        return nowNanos + Math.max(1, (long) (retryNanos * factor));
-    }
-
-    /** Priority default chain: explicit argument, then the context attribute,
-     * then the policy default, then zero. */
     private static int resolvePriority(Integer explicit, RateLimitContext context, RateLimitPolicy policy) {
-        if (explicit != null) {
-            return explicit;
-        }
-        Optional<Object> attribute = context.get(RateLimitContext.PRIORITY);
-        if (attribute.isPresent()) {
-            Object value = attribute.get();
-            if (value instanceof Number number) {
-                return number.intValue();
-            }
-            throw new IllegalArgumentException("context attribute '" + RateLimitContext.PRIORITY
-                    + "' must be a Number, got " + value.getClass().getSimpleName());
-        }
-        return policy.priority();
-    }
-
-    private static void validateAcquireArgs(long weight, Duration waitTimeout) {
-        if (weight < 1) {
-            throw new IllegalArgumentException("weight must be >= 1, got " + weight);
-        }
-        Objects.requireNonNull(waitTimeout, "waitTimeout");
-        if (waitTimeout.isNegative()) {
-            throw new IllegalArgumentException("waitTimeout must not be negative, got " + waitTimeout);
-        }
-    }
-
-    /**
-     * Final decision path: the waiter leaves the queue (waking the next head),
-     * the decision is stamped with the total wait duration and reported to the
-     * listeners exactly once. Decisions that never joined a queue (instant
-     * allows, reject-mode and schedule-less rejections, queue overflow) carry
-     * a zero wait.
-     */
-    private Decision finish(WaiterQueue queue, WaiterQueue.Waiter waiter, Decision decision,
-            Evaluation evaluation, long startNanos) {
-        if (waiter == null) {
-            notifyListeners(decision, evaluation.keyGroup());
-            return decision;
-        }
-        queue.remove(waiter);
-        long elapsedNanos = Math.max(0, System.nanoTime() - startNanos);
-        Decision finalDecision = decision.withWait(Duration.ofNanos(elapsedNanos));
-        notifyListeners(finalDecision, evaluation.keyGroup());
-        return finalDecision;
-    }
-
-    private void notifyListeners(Decision decision, String keyGroup) {
-        for (DecisionListener listener : listeners) {
-            listener.onDecision(decision, keyGroup);
-        }
-    }
-
-    /**
-     * Cancellation signal shared by an {@code acquireAsync} future and the
-     * worker running its throttle loop. {@link #cancel()} is idempotent: it
-     * removes the registered waiter from its queue (freeing the slot and
-     * waking the next head) and interrupts the worker so a parked wait ends
-     * promptly; the loop observes {@link #isCancelled()} and unwinds without
-     * finalizing a decision.
-     */
-    private static final class AsyncAcquisition {
-        private volatile boolean cancelled;
-        private volatile Thread worker;
-        private volatile WaiterQueue queue;
-        private volatile WaiterQueue.Waiter waiter;
-
-        void attach(Thread worker) {
-            this.worker = worker;
-        }
-
-        void register(WaiterQueue queue, WaiterQueue.Waiter waiter) {
-            this.queue = queue;
-            this.waiter = waiter;
-        }
-
-        boolean isCancelled() {
-            return cancelled;
-        }
-
-        void cancel() {
-            cancelled = true;
-            WaiterQueue registeredQueue = queue;
-            WaiterQueue.Waiter registeredWaiter = waiter;
-            if (registeredQueue != null && registeredWaiter != null) {
-                registeredQueue.remove(registeredWaiter);
-            }
-            Thread attached = worker;
-            if (attached != null) {
-                attached.interrupt();
-            }
-        }
-    }
-
-    /** Unwinds the throttle loop of a cancelled {@code acquireAsync} wait; never escapes the worker. */
-    private static final class AcquisitionCancelledException extends RuntimeException {
-        private AcquisitionCancelledException() {
-            super(null, null, false, false);
-        }
-    }
-
-    /** Daemon threads for {@code acquireAsync}, created only when first used. */
-    private static final class DefaultAsyncExecutor {
-        private static final AtomicLong THREADS = new AtomicLong();
-        private static volatile Executor instance;
-
-        private static Executor get() {
-            Executor executor = instance;
-            if (executor == null) {
-                synchronized (DefaultAsyncExecutor.class) {
-                    executor = instance;
-                    if (executor == null) {
-                        executor = Executors.newCachedThreadPool(runnable -> {
-                            Thread thread = new Thread(
-                                    runnable, "quotaflow-acquire-" + THREADS.incrementAndGet());
-                            thread.setDaemon(true);
-                            return thread;
-                        });
-                        instance = executor;
-                    }
-                }
-            }
-            return executor;
-        }
+        if (explicit != null) return explicit;
+        var attribute = context.get(RateLimitContext.PRIORITY);
+        if (attribute.isEmpty()) return policy.priority();
+        if (attribute.get() instanceof Number number) return number.intValue();
+        throw new IllegalArgumentException("context priority must be a Number");
     }
 
     public static final class Builder {
@@ -474,10 +345,30 @@ public final class DefaultQuotaFlow implements QuotaFlow {
         private KeyResolver defaultResolver = KeyResolvers.scopeBased();
         private final Map<String, KeyResolver> namedResolvers = new LinkedHashMap<>();
         private final List<DecisionListener> listeners = new ArrayList<>();
+        private final List<WaitListener> waitListeners = new ArrayList<>();
+        public Builder addWaitListener(WaitListener listener) {
+            waitListeners.add(Objects.requireNonNull(listener, "listener")); return this;
+        }
         private LimitResolver limitResolver;
         private String namespace = io.quotaflow.core.store.QuotaDomain.DEFAULT_NAMESPACE;
         private int maxWaitersPerPolicy = 1000;
         private Executor asyncExecutor;
+        private io.quotaflow.core.execution.BoundedExecution execution = io.quotaflow.core.execution.BoundedExecution.shared();
+        private Duration operationTimeout = Duration.ofSeconds(1);
+
+        /** Owned bounded dispatch service; its lifecycle remains the caller's responsibility. */
+        public Builder execution(io.quotaflow.core.execution.BoundedExecution execution) {
+            this.execution = Objects.requireNonNull(execution, "execution"); return this;
+        }
+        /** Finite bound of a nonwaiting evaluation; positive caller budgets are never extended. */
+        public Builder operationTimeout(Duration timeout) {
+            if (Objects.requireNonNull(timeout, "timeout").isNegative() || timeout.isZero())
+                throw new IllegalArgumentException("operationTimeout must be positive");
+            timeout.toNanos(); this.operationTimeout = timeout; return this;
+        }
+        private java.util.function.LongSupplier nanoClock = System::nanoTime;
+
+        Builder nanoClock(java.util.function.LongSupplier clock) { this.nanoClock = clock; return this; }
 
         private Builder(PolicySet policySet, RateLimitStore store) {
             this.policySet = Objects.requireNonNull(policySet, "policySet");
@@ -530,11 +421,8 @@ public final class DefaultQuotaFlow implements QuotaFlow {
             return this;
         }
 
-        /**
-         * Executor running {@code acquireAsync} waits (default: a shared
-         * cached pool of daemon threads). Async waiters consume one executor
-         * thread each for the duration of their wait.
-         */
+        /** Continuation admission executor. execute must return promptly; inline execution is supported.
+         * Blocking SPI calls always cross the separate bounded dispatch service. */
         public Builder asyncExecutor(Executor executor) {
             this.asyncExecutor = Objects.requireNonNull(executor, "executor");
             return this;

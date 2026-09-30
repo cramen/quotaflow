@@ -9,6 +9,8 @@ import io.quotaflow.core.store.LevelRequest;
 import io.quotaflow.core.store.RateLimitStore;
 import io.quotaflow.core.store.StoreResult;
 import java.time.Duration;
+import io.quotaflow.core.execution.BoundedExecution;
+import java.util.function.BooleanSupplier;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -153,26 +155,68 @@ public final class PolicyEngine {
 
     CompletionStage<Evaluation> evaluateInternalAsync(
             PolicySet policies, String leafPolicyId, RateLimitContext context, long weight) {
-        List<PendingLevel> levels;
-        try {
-            levels = preflight(policies, leafPolicyId, context, weight);
-        } catch (RuntimeException e) {
-            return CompletableFuture.failedFuture(e);
-        }
-        for (PendingLevel level : levels) {
-            if (level.limit() != null && weight > level.limit().capacity()) {
-                return CompletableFuture.completedFuture(rejectedBeforeStore(level));
-            }
-        }
-        if (store instanceof BatchRateLimitStore batchStore) {
-            List<LevelRequest> requests = levelRequests(levels, weight, policies);
-            if (requests.isEmpty()) {
-                return CompletableFuture.completedFuture(rejectedBeforeStore(levels.get(0)));
-            }
-            return batchStore.tryAcquireAll(requests)
-                    .thenApply(result -> batchEvaluation(levels, requests.size(), result));
-        }
-        return acquireChain(levels, 0, weight, Long.MAX_VALUE);
+        return evaluateInternalAsync(policies, leafPolicyId, context, weight, BoundedExecution.shared(), () -> true);
+    }
+
+    CompletionStage<Evaluation> evaluateInternalAsync(PolicySet policies, String leafPolicyId,
+            RateLimitContext context, long weight, BoundedExecution execution, BooleanSupplier active) {
+        return execution.submit(() -> {
+            Limit.validateWeight(weight);
+            Objects.requireNonNull(context, "context");
+            policies.policy(leafPolicyId);
+            if (policies.hasDynamicLimits(leafPolicyId) && store.requiresVersionedLimits()
+                    && !(limitResolver instanceof VersionedLimitResolver))
+                throw new PolicyConfigurationException("fenced dynamic policies require a VersionedLimitResolver");
+            return policies.hasDynamicLimits(leafPolicyId) && limitResolver instanceof VersionedLimitResolver versioned
+                    ? Objects.requireNonNull(versioned.snapshot(), "snapshot result").orElse(null) : null;
+        }, active).thenCompose(snapshot -> {
+            if (policies.hasDynamicLimits(leafPolicyId) && limitResolver instanceof VersionedLimitResolver && snapshot == null)
+                return CompletableFuture.completedFuture(rejectedBeforeStore(
+                        PendingLevel.unresolvableLimit(policies.chainFromLeaf(leafPolicyId).get(0), "unresolvable")));
+            return preflightAsync(policies, policies.chainFromLeaf(leafPolicyId), context, 0,
+                    new ArrayList<>(), snapshot, execution, active).thenCompose(levels -> {
+                for (PendingLevel level : levels) {
+                    if (level.limit() != null && weight > level.limit().capacity())
+                        return CompletableFuture.completedFuture(rejectedBeforeStore(level));
+                }
+                if (store instanceof BatchRateLimitStore batch) {
+                    var requests = levelRequests(levels, weight, policies);
+                    if (requests.isEmpty()) return CompletableFuture.completedFuture(rejectedBeforeStore(levels.get(0)));
+                    return execution.submitStage(() -> batch.tryAcquireAll(requests), active)
+                            .thenApply(result -> batchEvaluation(levels, requests.size(), result));
+                }
+                return acquireChain(levels, 0, weight, Long.MAX_VALUE, execution, active);
+            });
+        });
+    }
+
+    private CompletionStage<List<PendingLevel>> preflightAsync(PolicySet policies, List<RateLimitPolicy> chain,
+            RateLimitContext context, int index, List<PendingLevel> levels, LimitSnapshot snapshot,
+            BoundedExecution execution, BooleanSupplier active) {
+        if (index == chain.size()) return CompletableFuture.completedFuture(levels);
+        var policy = chain.get(index);
+        return execution.submit(() -> resolverFor(policy).resolve(context, policy), active).thenCompose(resolved -> {
+            var key = resolved.orElseGet(() -> policy.defaultKey().map(value -> new LimitKey(value, "default")).orElse(null));
+            if (key == null) { levels.add(PendingLevel.missingKey(policy)); return CompletableFuture.completedFuture(levels); }
+            CompletionStage<Optional<Limit>> limit;
+            if (policy.limitRef().isEmpty()) limit = CompletableFuture.completedFuture(policy.limit());
+            else if (snapshot != null) limit = CompletableFuture.completedFuture(snapshot.resolve(policy.limitRef().orElseThrow(), key.keyGroup()));
+            else if (limitResolver instanceof AsyncLimitResolver async)
+                limit = execution.submitStage(() -> async.resolveAsync(policy.limitRef().orElseThrow(), key.keyGroup()), active);
+            else limit = execution.submit(() -> Optional.ofNullable(effectiveLimit(policy, key.keyGroup(), limitResolver)), active);
+            return limit.thenCompose(value -> {
+                if (value.isEmpty()) {
+                    log.warn("policy '{}' limit reference '{}' is unresolvable for key group '{}'; rejecting request",
+                            policy.id(), policy.limitRef().orElseThrow(), key.keyGroup());
+                    levels.add(PendingLevel.unresolvableLimit(policy, key.keyGroup()));
+                    return CompletableFuture.completedFuture(levels);
+                }
+                var identity = new BucketIdentity(new QuotaDomain(namespace, policies.rootPolicyId(policy.id())),
+                        policy.id(), policy.scope(), key.rawKey());
+                levels.add(PendingLevel.resolved(policy, identity, key.keyGroup(), value.get(), snapshot));
+                return preflightAsync(policies, chain, context, index + 1, levels, snapshot, execution, active);
+            });
+        });
     }
 
     /**
@@ -219,7 +263,8 @@ public final class PolicyEngine {
     }
 
     private CompletionStage<Evaluation> acquireChain(
-            List<PendingLevel> levels, int index, long weight, long minRemaining) {
+            List<PendingLevel> levels, int index, long weight, long minRemaining,
+            BoundedExecution execution, BooleanSupplier active) {
         if (index == levels.size()) {
             return CompletableFuture.completedFuture(allowed(levels.get(levels.size() - 1), minRemaining));
         }
@@ -227,13 +272,12 @@ public final class PolicyEngine {
         if (!level.reachesStore()) {
             return CompletableFuture.completedFuture(rejectedBeforeStore(level));
         }
-        return store
-                .tryAcquireAsync(level.storageKey(), level.limit(), level.policy().algorithm(), weight)
+        return execution.submitStage(() -> store.tryAcquireAsync(level.storageKey(), level.limit(), level.policy().algorithm(), weight), active)
                 .thenCompose(result -> {
                     if (!result.acquired()) {
                         return CompletableFuture.completedFuture(rejection(level, result));
                     }
-                    return acquireChain(levels, index + 1, weight, Math.min(minRemaining, result.remaining()));
+                    return acquireChain(levels, index + 1, weight, Math.min(minRemaining, result.remaining()), execution, active);
                 });
     }
 

@@ -18,6 +18,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
@@ -41,11 +42,13 @@ class TariffResolutionTckTest {
         return map;
     }
 
+    private final AtomicLong firstLookupNanos = new AtomicLong();
     private final AtomicInteger resolverCalls = new AtomicInteger();
     private final AtomicReference<Optional<Limit>> tariff = new AtomicReference<>();
 
     private CachingLimitResolver cachingResolver() {
         return CachingLimitResolver.wrap((limitRef, keyGroup) -> {
+            firstLookupNanos.compareAndSet(0, System.nanoTime());
             resolverCalls.incrementAndGet();
             return tariff.get();
         }, TTL);
@@ -75,15 +78,16 @@ class TariffResolutionTckTest {
         assertEquals(1, resolverCalls.get(), "no resolver calls within the TTL");
 
         tariff.set(Optional.of(new Limit(10, 100, Duration.ofSeconds(1))));
-        long changedAt = System.nanoTime();
-
-        // before the TTL expires the cached (old) tariff keeps governing
-        while (System.nanoTime() - changedAt < TTL.toNanos()) {
-            assertFalse(quotaFlow.tryAcquire("u", ALICE).isAllowed(),
-                    "tariff change must not apply before the TTL expires");
+        // TTL belongs to the completed lookup, not the later provider edit.
+        // A call can cross the boundary while dispatching asynchronously.
+        while (System.nanoTime() - firstLookupNanos.get() < TTL.toNanos()) {
+            Decision decision = quotaFlow.tryAcquire("u", ALICE);
+            if (System.nanoTime() - firstLookupNanos.get() < TTL.toNanos()) {
+                assertFalse(decision.isAllowed(), "cached exhausted tariff remains active within its TTL");
+                assertEquals(1, resolverCalls.get());
+            }
             Thread.sleep(5);
         }
-        assertEquals(1, resolverCalls.get());
 
         // after the TTL the new tariff is adopted, without a restart
         awaitTrue(() -> quotaFlow.tryAcquire("u", ALICE).isAllowed(),

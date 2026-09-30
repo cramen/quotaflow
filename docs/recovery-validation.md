@@ -1,6 +1,6 @@
 # Conservative recovery validation
 
-Validation date: 2026-09-30. These results cover the coordinated recovery implementation and versioned dynamic-limit snapshots. They do not certify the entire library for release.
+Validation date: 2026-09-30, producer implementation committed as `5e2c853`. This records the recovery producer before the subsequent [acquisition lifecycle](acquisition-lifecycle.md) integration. These results cover the coordinated recovery implementation and versioned dynamic-limit snapshots. They do not certify the entire library for release.
 
 ## Correctness evidence
 

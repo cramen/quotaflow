@@ -15,9 +15,10 @@ import java.util.Optional;
  * level would admit the request) and empty for missing-key rejections, which
  * are not governed by a refill schedule.
  *
- * <p>{@code waitDuration} is the total time the caller spent queued by the
- * throttle machinery before this final decision; it is zero for instant
- * decisions. {@code throttleRejection} distinguishes throttle-specific
+ * <p>{@code waitDuration} is elapsed time from API entry for queued or
+ * timed-out positive acquisitions, including dispatch, resolver and store delay.
+ * It is zero for successful nonqueued and ordinary nonwaiting decisions; it is
+ * not literal queue residence. {@code throttleRejection} distinguishes throttle-specific
  * rejections (wait timeout, queue overflow) from ordinary quota rejections
  * and is empty on every decision that did not come out of a throttle wait.
  */

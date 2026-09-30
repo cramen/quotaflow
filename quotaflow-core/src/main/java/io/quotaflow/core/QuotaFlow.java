@@ -8,13 +8,17 @@ import java.util.concurrent.CompletionStage;
  * {@link Decision} values, never thrown; exceptions are reserved for caller
  * misuse (unknown policy id, invalid weight).
  *
- * <p>{@code tryAcquire} decides instantly. {@code acquire} adds the throttle
+ * <p>{@code tryAcquire} performs one nonwaiting evaluation under a finite operational timeout. {@code acquire} adds the throttle
  * reaction: when the quota of a throttle-mode policy is exhausted, the caller
- * waits (virtual-thread-friendly parking, never beyond its own wait timeout)
- * and retries as quota refills, instead of being rejected immediately. The
+ * waits on its own thread for synchronous calls, or retains a continuation for
+ * asynchronous calls, and retries as quota refills, instead of being rejected immediately. The
  * final decision — allowed after waiting, or rejected with a
  * {@link ThrottleRejection} reason — is data, carries the total wait duration
- * and fires exactly one {@link DecisionListener} event.
+ * and fires exactly one {@link DecisionListener} event. Positive budgets start
+ * at API entry and cover dispatch, resolution, store work and retries. Scheduler
+ * or JVM pauses can delay timeout delivery but never authorize a late allow.
+ * Cancellation that wins emits no terminal event. An already dispatched command
+ * may still debit quota; cancellation never promises rollback or an automatic refund.
  */
 public interface QuotaFlow {
 

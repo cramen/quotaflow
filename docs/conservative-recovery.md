@@ -183,9 +183,10 @@ retain their last validated metadata until reconciliation or safe expiry.
 
 `RecoveryPending` exposes a generation-specific shared readiness signal.
 Cancelling a caller's view cannot cancel the shared signal, and a wake-up does
-not grant quota. Until readiness is composed with the throttle lifecycle, the
-facade reports a schedule-less rejection. Queue/deadline/cancellation composition
-is a separate required release change.
+not grant quota. A positive throttle acquisition waits in its bounded policy
+queue and re-evaluates the complete chain when readiness changes, retaining its
+original deadline. Nonwaiting/reject calls return a schedule-less rejection.
+See [acquisition lifecycle](acquisition-lifecycle.md) for cancellation and timeout semantics.
 
 ## Restart, replacement and scaling
 

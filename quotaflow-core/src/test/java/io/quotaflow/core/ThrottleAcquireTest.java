@@ -170,7 +170,7 @@ class ThrottleAcquireTest {
         assertTrue(flow.tryAcquire("t", RateLimitContext.empty()).isAllowed());
         Decision decision = flow.acquire("t", RateLimitContext.empty(), 1, Duration.ZERO);
         assertFalse(decision.isAllowed());
-        assertEquals(Optional.of(ThrottleRejection.WAIT_TIMEOUT), decision.throttleRejection());
+        assertTrue(decision.throttleRejection().isEmpty());
         assertEquals(Duration.ZERO, decision.waitDuration());
     }
 

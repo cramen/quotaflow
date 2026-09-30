@@ -4,6 +4,8 @@ import io.quotaflow.core.Decision
 import io.quotaflow.core.DecisionListener
 import io.quotaflow.core.DefaultQuotaFlow
 import io.quotaflow.core.KeyResolver
+import io.quotaflow.core.WaitListener
+import io.quotaflow.core.execution.BoundedExecution
 import io.quotaflow.core.LimitResolver
 import io.quotaflow.core.PolicySet
 import io.quotaflow.core.RateLimitContext
@@ -23,14 +25,16 @@ import kotlinx.coroutines.future.await
  * Coroutine-native facade over [DefaultQuotaFlow]. Every acquisition is a plain
  * `suspend` call built on the facade's asynchronous (`CompletionStage`) paths
  * via `await()`: the calling coroutine suspends and resumes, it never blocks or
- * parks a thread — including while waiting in throttle mode, where the actual
- * parked workers live in the facade's own daemon pool, invisible to coroutine
- * callers. The semantics (chain evaluation, degradation, throttle, decision
+ * parks a thread. Throttle waiters retain continuations and timers, while
+ * potentially blocking resolver/store invocation uses bounded compatibility workers. The semantics (chain evaluation, degradation, throttle, decision
  * shape) are exactly those of the Java facade; rejections remain data, never
  * exceptions.
  *
  * Cancelling a waiting coroutine abandons the wait immediately: the coroutine
- * resumes with `CancellationException` without waiting for the throttle loop.
+ * resumes with `CancellationException`. Cancellation before Java finalization
+ * suppresses its terminal event; prompt coroutine cancellation after Java
+ * finalization retains that valid event. Already dispatched quota debits are
+ * not refunded. Positive budgets include time since API entry.
  *
  * Create instances through [builder] so the decision stream is wired into the
  * facade's listener pipeline.
@@ -134,7 +138,22 @@ public class CoroutineQuotaFlow private constructor(
             delegate.maxWaitersPerPolicy(maxWaitersPerPolicy)
         }
 
-        /** Executor running the facade's asynchronous throttle waits. */
+        /** Caller-owned bounded compatibility execution. */
+        public fun execution(execution: BoundedExecution): Builder = apply {
+            delegate.execution(execution)
+        }
+
+        /** Operational evaluation timeout; positive caller budgets are never extended. */
+        public fun operationTimeout(timeout: Duration): Builder = apply {
+            delegate.operationTimeout(timeout.toJavaDuration())
+        }
+
+        /** Queue-entry events remain separate from the terminal decision flow. */
+        public fun addWaitListener(listener: WaitListener): Builder = apply {
+            delegate.addWaitListener(listener)
+        }
+
+        /** Continuation admission executor; execute must return promptly. */
         public fun asyncExecutor(executor: Executor): Builder = apply {
             delegate.asyncExecutor(executor)
         }
