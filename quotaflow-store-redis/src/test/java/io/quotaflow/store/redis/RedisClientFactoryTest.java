@@ -29,6 +29,19 @@ class RedisClientFactoryTest {
     }
 
     @Test
+    void ownedClientsRejectDisconnectedWorkAndDisableReplay() {
+        var client = RedisClientFactory.createClient("redis://localhost:6379", java.time.Duration.ofSeconds(1),
+                java.time.Duration.ofMillis(100));
+        try {
+            var options = client.getOptions();
+            assertEquals(io.lettuce.core.ClientOptions.DisconnectedBehavior.REJECT_COMMANDS, options.getDisconnectedBehavior());
+            assertEquals(4096, options.getRequestQueueSize());
+            org.junit.jupiter.api.Assertions.assertFalse(options.getReplayFilter().test(null));
+            org.junit.jupiter.api.Assertions.assertTrue(options.getTimeoutOptions().isTimeoutCommands());
+        } finally { client.shutdown(); }
+    }
+
+    @Test
     void testClasspathCarriesTheIncompleteEpollStack() throws Exception {
         ClassLoader classLoader = getClass().getClassLoader();
         Class.forName(EPOLL, false, classLoader);

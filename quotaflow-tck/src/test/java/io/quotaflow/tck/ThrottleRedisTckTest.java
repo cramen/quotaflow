@@ -48,6 +48,6 @@ class ThrottleRedisTckTest extends TckContainers {
 
     private static RedisRateLimitStore redisStore() {
         RedisClient client = newClient(redisUri());
-        return RedisRateLimitStore.create(client, RedisStoreConfig.defaults());
+        return io.quotaflow.testing.RecoveryStoreFixture.create(client, RedisStoreConfig.defaults());
     }
 }

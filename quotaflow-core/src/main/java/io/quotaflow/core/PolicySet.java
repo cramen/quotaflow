@@ -19,6 +19,8 @@ public final class PolicySet {
 
     private final Map<String, RateLimitPolicy> policies;
     private final Map<String, String> rootPolicyIds;
+    private final java.util.Set<String> dynamicRoots;
+    private final java.util.concurrent.ConcurrentHashMap<String, String> recoveryFingerprints = new java.util.concurrent.ConcurrentHashMap<>();
 
     private PolicySet(Map<String, RateLimitPolicy> policies) {
         this.policies = policies;
@@ -31,6 +33,19 @@ public final class PolicySet {
             roots.put(policy.id(), root.id());
         }
         this.rootPolicyIds = Map.copyOf(roots);
+        var dynamic = new java.util.HashSet<String>();
+        for (var policy : policies.values()) if (policy.limitRef().isPresent()) dynamic.add(roots.get(policy.id()));
+        dynamicRoots = java.util.Set.copyOf(dynamic);
+    }
+
+    /** Whether the canonical root domain containing this policy uses dynamic tariffs. */
+    public boolean hasDynamicLimits(String policyId) { return dynamicRoots.contains(rootPolicyId(policyId)); }
+
+    /** Immutable quota-affecting configuration identity, cached once per root. */
+    public String recoveryFingerprint(String rootPolicyId) {
+        if (!rootPolicyId(rootPolicyId).equals(rootPolicyId)) throw new PolicyConfigurationException("recovery fingerprint requires a root policy");
+        return recoveryFingerprints.computeIfAbsent(rootPolicyId,
+                root -> io.quotaflow.core.store.RecoveryPolicySource.fingerprintTree(this, root));
     }
 
     /** Stable slot domain for a policy, including a directly evaluated ancestor. */

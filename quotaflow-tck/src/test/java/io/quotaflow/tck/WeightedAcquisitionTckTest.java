@@ -38,7 +38,7 @@ class WeightedAcquisitionTckTest extends TckContainers {
         String key = uniqueKey("weighted-" + algorithm.name().toLowerCase() + ":global:key");
         Limit limit = new Limit(10, 1, Duration.ofSeconds(1));
         RedisClient client = newClient(uri);
-        try (RedisRateLimitStore store = RedisRateLimitStore.create(client, RedisStoreConfig.defaults())) {
+        try (RedisRateLimitStore store = io.quotaflow.testing.RecoveryStoreFixture.create(client, RedisStoreConfig.defaults())) {
             StoreResult first = store.tryAcquire(key(key), limit, algorithm, 6);
             assertTrue(first.acquired(), "weight 6 against capacity 10");
             assertEquals(4, first.remaining());

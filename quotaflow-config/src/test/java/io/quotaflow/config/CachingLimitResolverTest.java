@@ -87,4 +87,19 @@ class CachingLimitResolverTest {
         assertThrows(NullPointerException.class, () -> caching.resolve(null, "tenant"));
         assertThrows(NullPointerException.class, () -> caching.resolve("tariff", null));
     }
+    @org.junit.jupiter.api.Test void wrappingPreservesCompleteVersionedSnapshots() {
+        var key = new io.quotaflow.core.LimitSnapshot.Key("plan", "global");
+        var first = new io.quotaflow.core.LimitSnapshot(1, java.util.Map.of(key, new io.quotaflow.core.Limit(10, 1, java.time.Duration.ofSeconds(1))));
+        var published = new java.util.concurrent.atomic.AtomicReference<java.util.Optional<io.quotaflow.core.LimitSnapshot>>(java.util.Optional.of(first));
+        io.quotaflow.core.VersionedLimitResolver provider = published::get;
+        var wrapped = CachingLimitResolver.wrap(provider);
+        org.junit.jupiter.api.Assertions.assertInstanceOf(io.quotaflow.core.VersionedLimitResolver.class, wrapped);
+        org.junit.jupiter.api.Assertions.assertSame(first, ((io.quotaflow.core.VersionedLimitResolver) wrapped).snapshot().orElseThrow());
+        var second = new io.quotaflow.core.LimitSnapshot(2, java.util.Map.of(key, new io.quotaflow.core.Limit(1, 1, java.time.Duration.ofSeconds(1))));
+        published.set(java.util.Optional.of(second));
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.Optional.of(second.limits().get(key)), wrapped.resolve("plan", "global"));
+        wrapped.clear();
+        org.junit.jupiter.api.Assertions.assertSame(second, ((io.quotaflow.core.VersionedLimitResolver) wrapped).snapshot().orElseThrow());
+        published.set(java.util.Optional.empty()); org.junit.jupiter.api.Assertions.assertTrue(wrapped.resolve("plan", "global").isEmpty());
+    }
 }

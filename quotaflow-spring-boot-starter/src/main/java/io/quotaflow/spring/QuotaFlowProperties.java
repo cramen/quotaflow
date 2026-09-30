@@ -43,6 +43,8 @@ public class QuotaFlowProperties {
     /** Bound of each throttle policy's waiter queue. */
     private int maxWaitersPerPolicy = 1000;
 
+    private final Recovery recovery = new Recovery();
+    public Recovery getRecovery() { return recovery; }
     private final Redis redis = new Redis();
     private final Fallback fallback = new Fallback();
     private final Reload reload = new Reload();
@@ -52,11 +54,18 @@ public class QuotaFlowProperties {
     /**
      * Converts the bound policy model into the flat map shape
      * {@link ConfigurationParser#parse(Map)} understands. Only
-     * {@code quotaflow.defaults.*} and {@code quotaflow.policies.*} keys are
-     * emitted; Spring-only tuning keys never enter the configuration payload.
+     * policy/default keys and immutable accounting settings are emitted. The
+     * endpoint is included for startup-target comparison; other Spring tuning
+     * keys remain outside the reload payload.
      */
     public Map<String, String> toConfigurationMap() {
         Map<String, String> map = new LinkedHashMap<>();
+        map.put(ConfigurationParser.NAMESPACE_KEY, namespace);
+        map.put(ConfigurationParser.ENDPOINT_KEY, redis.url);
+        map.put(ConfigurationParser.RECOVERY_PREFIX + "mode", recovery.mode);
+        map.put(ConfigurationParser.RECOVERY_PREFIX + "deployment-id", recovery.deploymentId);
+        map.put(ConfigurationParser.RECOVERY_PREFIX + "instance-id", recovery.instanceId);
+        map.put(ConfigurationParser.RECOVERY_PREFIX + "members", recovery.members);
         if (defaults.getAlgorithm() != null) {
             map.put(ConfigurationParser.DEFAULTS_PREFIX + "algorithm", defaults.getAlgorithm().name());
         }
@@ -117,6 +126,22 @@ public class QuotaFlowProperties {
 
     public Map<String, Policy> getPolicies() {
         return policies;
+    }
+
+    /** Fixed membership and stable slot identity; none of these values are hot-reloadable. */
+    public static class Recovery {
+        private String mode = "coordinated";
+        public String getMode() { return mode; }
+        public void setMode(String value) { mode = value; }
+        private String deploymentId = "default";
+        private String instanceId = "single";
+        private String members = "single";
+        public String getDeploymentId() { return deploymentId; }
+        public void setDeploymentId(String value) { deploymentId = value; }
+        public String getInstanceId() { return instanceId; }
+        public void setInstanceId(String value) { instanceId = value; }
+        public String getMembers() { return members; }
+        public void setMembers(String value) { members = value; }
     }
 
     /** Distributed store endpoint and timeouts. */

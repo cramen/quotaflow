@@ -115,15 +115,37 @@ public final class SoakHarness {
         String uri = "redis://" + redis.getHost() + ':' + redis.getMappedPort(6379);
 
         Counters counters = new Counters();
-        RedisClient client = RedisClient.create(uri);
+        RedisClient client = io.quotaflow.store.redis.RedisClientFactory.createClient(uri, Duration.ofSeconds(2), STORE_CONFIG.commandTimeout());
         try (var provisioning = client.connect()) {
             new io.quotaflow.store.redis.RedisNamespaceAdmin(provisioning).provisionFresh("default", true);
         }
-        RedisRateLimitStore primary = RedisRateLimitStore.create(client, STORE_CONFIG);
-        FallbackRateLimitStore store = new FallbackRateLimitStore(
-                primary, primary, FALLBACK_CONFIG, List.of(counters));
-
         ConfigSourcePayload payload = new ConfigSourcePayload();
+        var cohort = new io.quotaflow.core.store.RecoveryCohort(java.util.stream.IntStream.range(0, EXPECTED_INSTANCES)
+                .mapToObj(Integer::toString).toList());
+        var policies = payload.currentPolicySet();
+        var bindings = policies.policies().stream().map(policy -> new io.quotaflow.core.store.PolicyBinding(
+                new io.quotaflow.core.store.QuotaDomain("default", policies.rootPolicyId(policy.id())), policy.id(), policy.scope(), policy.algorithm())).toList();
+        var primaries = new java.util.ArrayList<RedisRateLimitStore>();
+        var stores = new java.util.ArrayList<FallbackRateLimitStore>();
+        try (var adminConnection = client.connect()) {
+            var adminStore = new RedisRateLimitStore(adminConnection, STORE_CONFIG);
+            adminStore.registerPolicies(bindings).toCompletableFuture().join();
+            var admin = new io.quotaflow.store.redis.RedisRecoveryController(adminConnection, Duration.ofSeconds(2));
+            admin.provisionCohort("default", cohort, "initial", true, true).toCompletableFuture().join();
+            for (var domain : bindings.stream().map(io.quotaflow.core.store.PolicyBinding::domain).distinct().toList())
+                admin.provisionDomain(domain, cohort, "initial", policies.recoveryFingerprint(domain.rootPolicyId()), true, true).toCompletableFuture().join();
+        }
+        for (String member : cohort.members()) {
+            var primary = RedisRateLimitStore.create(client, STORE_CONFIG); primaries.add(primary);
+            var settings = new io.quotaflow.fallback.RecoverySettings("default", "soak", member, cohort, 10_000, 4096,
+                    Duration.ofMillis(100), Duration.ofSeconds(2));
+            var owner = new FallbackRateLimitStore(primary.recoveryPrimary("default", STORE_CONFIG.commandTimeout(), true),
+                    settings, member.equals("0") ? List.of(counters) : List.of());
+            owner.registerPolicies(bindings).toCompletableFuture().join();
+            owner.configureRecovery(policies, "default", null).toCompletableFuture().join(); stores.add(owner);
+        }
+        FallbackRateLimitStore store = stores.get(0);
+
         DefaultQuotaFlow quotaFlow = DefaultQuotaFlow
                 .builder(payload.currentPolicySet(), store)
                 .addResolver(KeyResolvers.PRINCIPAL_ID, KeyResolvers.principal())
@@ -131,6 +153,8 @@ public final class SoakHarness {
                 .addResolver(KeyResolvers.API_KEY_ID, KeyResolvers.apiKey())
                 .build();
         ConfigReloader reloader = ConfigReloader.builder(payload, quotaFlow)
+                .startupAccounting(io.quotaflow.config.ConfigurationParser.parse(payload.load()).accounting())
+                .onApplied(() -> stores.stream().skip(1).forEach(owner -> owner.configureRecovery(payload.currentPolicySet(), "default", null).toCompletableFuture().join()))
                 .pollInterval(Duration.ofMillis(200))
                 .build();
         reloader.start();
@@ -154,7 +178,8 @@ public final class SoakHarness {
             threads.shutdownNow();
             threads.awaitTermination(10, TimeUnit.SECONDS);
             reloader.close();
-            primary.close();
+            stores.forEach(FallbackRateLimitStore::close);
+            primaries.forEach(RedisRateLimitStore::close);
             client.shutdown();
             redis.stop();
         }
@@ -206,15 +231,14 @@ public final class SoakHarness {
         await(running);
         Limit probeLimit = new Limit(1_000_000_000, 1_000_000, Duration.ofSeconds(1));
         List<LevelRequest> chain = List.of(
-                new LevelRequest(key("soak-probe:global:probe"), probeLimit, Algorithm.TOKEN_BUCKET, 1));
+                new LevelRequest(new BucketIdentity(new io.quotaflow.core.store.QuotaDomain("default", "soak-probe"),
+                        "soak-probe", io.quotaflow.core.Scope.GLOBAL, "probe"), probeLimit, Algorithm.TOKEN_BUCKET, 1));
         while (System.nanoTime() < deadlineNanos) {
             long start = System.nanoTime();
             try {
                 ChainResult result = store.tryAcquireAll(chain).toCompletableFuture().join();
                 long latency = System.nanoTime() - start;
-                if (!result.acquired()) {
-                    counters.violations.add("probe rejected with an effectively unlimited limit");
-                }
+                // Cold guards and unresolved recovery barriers may reject this diagnostic acquisition.
                 counters.recordProbe(latency, store.state() == DegradationState.OPEN);
             } catch (Throwable e) {
                 if (!isInterruption(e)) {
@@ -376,6 +400,14 @@ public final class SoakHarness {
 
         static Map<String, String> payload(long leafCapacity) {
             Map<String, String> map = new LinkedHashMap<>();
+            map.put("quotaflow.defaults.expected-instances", Integer.toString(EXPECTED_INSTANCES));
+            map.put("quotaflow.recovery.members", "0,1,2,3");
+            map.put("quotaflow.recovery.instance-id", "0");
+            map.put("quotaflow.recovery.deployment-id", "soak");
+            map.put("quotaflow.policies.soak-probe.scope", "global");
+            map.put("quotaflow.policies.soak-probe.limit.capacity", "1000000000");
+            map.put("quotaflow.policies.soak-probe.limit.refill-amount", "1000000");
+            map.put("quotaflow.policies.soak-probe.limit.refill-period", "PT1S");
             map.put("quotaflow.policies.global.scope", "global");
             map.put("quotaflow.policies.global.limit.capacity", Long.toString(GLOBAL_CAPACITY));
             map.put("quotaflow.policies.global.limit.refill-amount", Long.toString(GLOBAL_REFILL));

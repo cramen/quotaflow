@@ -15,6 +15,10 @@ import java.util.List;
  */
 public interface RateLimitStore {
 
+    /** Whether dynamic input must carry a versioned immutable resolver snapshot. */
+    default boolean requiresVersionedLimits() { return false; }
+
+
     /**
      * Atomically validates/registers the complete candidate before policy publication.
      * Implementations retain removed bindings and reject algorithm/scope/domain reassignment.

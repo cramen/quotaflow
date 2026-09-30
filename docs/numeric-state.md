@@ -88,7 +88,10 @@ another instance cannot switch algorithms within the same namespace. Seed
 `BucketState.limit()` is the target distributed limit, not its scaled local
 share. A seed merges only whole credit and uses that target fingerprint.
 Fingerprints do not establish version order: recovery epoch/session/configuration
-fencing and stale-seed races belong to the subsequent recovery protocol.
+fencing is enforced by the [conservative recovery protocol](conservative-recovery.md)
+before any stale acquisition or seed can normalize quota state. Dynamic inputs
+carry an immutable provider snapshot revision/digest; policy fingerprints alone
+cannot order changes behind an unchanged limit reference.
 
 ## Coordinated transition and rollback
 

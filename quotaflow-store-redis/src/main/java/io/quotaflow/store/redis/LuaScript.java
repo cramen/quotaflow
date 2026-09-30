@@ -38,6 +38,14 @@ final class LuaScript {
         return new LuaScript(source, sha1Hex(source.getBytes(StandardCharsets.UTF_8)));
     }
 
+    static LuaScript coordinated(String resource, String operation) {
+        if (!operation.equals("acquire") && !operation.equals("seed")) throw new IllegalArgumentException("unknown operation");
+        String source = load("/lua/recovery_guard.lua").source() + "\nif not recovery_authorize('" + operation
+                + "') then return {-20} end\n"
+                + (operation.equals("seed") ? "if #KEYS == 0 then return {1} end\n" : "") + load(resource).source();
+        return new LuaScript(source, sha1Hex(source.getBytes(StandardCharsets.UTF_8)));
+    }
+
     String source() {
         return source;
     }

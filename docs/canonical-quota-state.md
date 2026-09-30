@@ -36,11 +36,15 @@ Replace string store keys with explicit values:
 QuotaDomain domain = new QuotaDomain("orders", "provider");
 BucketIdentity tenant = new BucketIdentity(domain, "tenant", Scope.TENANT, "acme");
 store.registerPolicies(List.of(PolicyBinding.of(tenant, Algorithm.TOKEN_BUCKET))).toCompletableFuture().join();
+// The Redis SPI additionally requires a validated recovery context.
+store.bindRecoveryContext(validatedContext);
 store.tryAcquire(tenant, limit, Algorithm.TOKEN_BUCKET, 1);
 ```
 
 `LevelRequest` and `BucketState` now carry `BucketIdentity` in `storageKey()`.
-`StateSeeder.seed` accepts `QuotaDomain` and snapshots, not a leaf key. Validate
+`StateSeeder.seed` accepts `QuotaDomain` and snapshots, not a leaf key. Redis
+seeding additionally requires a controller context authorizing the current handoff;
+see [conservative recovery](conservative-recovery.md). Validate
 all seed identities against that domain before writing any bucket. Code that
 previously parsed a scope/policy from a string uses the typed accessors instead;
 raw keys remain excluded from telemetry and non-DEBUG logs. Identity `toString`

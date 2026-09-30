@@ -6,7 +6,21 @@ package io.quotaflow.core.store;
  * could fit after refill; zero on rejection means no refill schedule exists.
  * It is also zero when {@code acquired} is true.
  */
-public record StoreResult(boolean acquired, long remaining, long retryAfterMillis) {
+public record StoreResult(boolean acquired, long remaining, long retryAfterMillis, RecoveryPending recoveryPending) {
+
+    public StoreResult(boolean acquired, long remaining, long retryAfterMillis) {
+        this(acquired, remaining, retryAfterMillis, null);
+    }
+
+    public StoreResult {
+        if (recoveryPending != null && (acquired || remaining != 0 || retryAfterMillis != 0)) {
+            throw new IllegalArgumentException("recovery-pending outcome cannot grant quota or a refill schedule");
+        }
+    }
+
+    public static StoreResult pending(RecoveryPending pending) {
+        return new StoreResult(false, 0, 0, java.util.Objects.requireNonNull(pending, "pending"));
+    }
 
     public static StoreResult acquired(long remaining) {
         return new StoreResult(true, remaining, 0);

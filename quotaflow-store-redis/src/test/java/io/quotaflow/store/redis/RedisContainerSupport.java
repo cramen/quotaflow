@@ -50,12 +50,12 @@ abstract class RedisContainerSupport {
     }
 
     protected static RedisRateLimitStore newStore(StatefulRedisConnection<String, String> connection) {
-        return new RedisRateLimitStore(connection, RedisStoreConfig.defaults());
+        return new io.quotaflow.testing.RecoveryStoreFixture(connection, RedisStoreConfig.defaults());
     }
 
     protected static RedisRateLimitStore newStore(
             StatefulRedisConnection<String, String> connection, Duration commandTimeout) {
-        return new RedisRateLimitStore(
+        return new io.quotaflow.testing.RecoveryStoreFixture(
                 connection, new RedisStoreConfig(commandTimeout, Duration.ofSeconds(30)));
     }
 

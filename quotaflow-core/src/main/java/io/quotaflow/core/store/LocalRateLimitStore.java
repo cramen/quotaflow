@@ -34,7 +34,11 @@ public final class LocalRateLimitStore implements BatchRateLimitStore {
     }
 
     /** A distinct wrapper prevents ABA even when a tree becomes empty again. */
-    private record Version(Node root) { }
+    private record Version(Node root, long admissionGeneration, RecoveryPending pending, long fenceGeneration) {
+        Version(Node root) { this(root, 0, null, -1); }
+    }
+
+    public enum InitialCredit { FULL, EMPTY }
 
     private static final class Node {
         final BucketIdentity key;
@@ -56,6 +60,7 @@ public final class LocalRateLimitStore implements BatchRateLimitStore {
     private final LongSupplier nanoClock;
     private final LocalPolicyBindings bindings;
     private final Runnable beforeCommit;
+    private final InitialCredit initialCredit;
 
     public LocalRateLimitStore() { this(System::nanoTime); }
     public LocalRateLimitStore(LongSupplier nanoClock) {
@@ -67,6 +72,15 @@ public final class LocalRateLimitStore implements BatchRateLimitStore {
 
     /** Test seam for controlled preemption after preparation and before publication. */
     LocalRateLimitStore(LongSupplier nanoClock, int maxRegisteredPolicies, Runnable beforeCommit) {
+        this(nanoClock, maxRegisteredPolicies, InitialCredit.FULL, beforeCommit);
+    }
+
+    public LocalRateLimitStore(LongSupplier nanoClock, int maxRegisteredPolicies, InitialCredit initialCredit) {
+        this(nanoClock, maxRegisteredPolicies, initialCredit, NO_OBSERVER);
+    }
+
+    LocalRateLimitStore(LongSupplier nanoClock, int maxRegisteredPolicies, InitialCredit initialCredit, Runnable beforeCommit) {
+        this.initialCredit = Objects.requireNonNull(initialCredit, "initialCredit");
         this.nanoClock = Objects.requireNonNull(nanoClock, "nanoClock");
         this.bindings = new LocalPolicyBindings(maxRegisteredPolicies);
         this.beforeCommit = Objects.requireNonNull(beforeCommit, "beforeCommit");
@@ -83,7 +97,7 @@ public final class LocalRateLimitStore implements BatchRateLimitStore {
         LevelRequest request = new LevelRequest(key, limit, algorithm, weight);
         bindings.register(key, algorithm);
         ChainResult result = acquire(List.of(request));
-        return new StoreResult(result.acquired(), result.remaining(), result.retryAfterMillis());
+        return new StoreResult(result.acquired(), result.remaining(), result.retryAfterMillis(), result.recoveryPending());
     }
 
     @Override
@@ -102,8 +116,14 @@ public final class LocalRateLimitStore implements BatchRateLimitStore {
     private ChainResult acquire(List<LevelRequest> chain) {
         AtomicReference<Version> domain = domains.computeIfAbsent(chain.get(0).storageKey().domain(),
                 ignored -> new AtomicReference<>(new Version(null)));
+        long admittedGeneration = domain.get().admissionGeneration;
         while (true) {
             Version previous = domain.get();
+            if (previous.pending != null) return ChainResult.pending(0, previous.pending);
+            if (previous.admissionGeneration != admittedGeneration) {
+                return ChainResult.pending(0, new RecoveryPending(chain.get(0).storageKey().domain(),
+                        previous.admissionGeneration, CompletableFuture.completedFuture(null)));
+            }
             long now = nanoClock.getAsLong();
             Cell[] states = new Cell[chain.size()];
             int rejected = -1;
@@ -124,13 +144,13 @@ public final class LocalRateLimitStore implements BatchRateLimitStore {
                 if (fired < 0) state = new Cell(state.tokens - level.weight(), state.remainder,
                         state.timestamp, state.limit, state.algorithm);
                 // A rejection must not allocate untouched full buckets for arbitrary new raw keys.
-                if (fired < 0 || find(previous.root, level.storageKey()) != null) {
+                if (fired < 0 || state.tokens < state.limit.capacity() || find(previous.root, level.storageKey()) != null) {
                     next = put(next, level.storageKey(), state);
                 }
                 remaining = Math.min(remaining, state.tokens);
             }
             beforeCommit.run();
-            if (!domain.compareAndSet(previous, new Version(next))) continue;
+            if (!domain.compareAndSet(previous, new Version(next, previous.admissionGeneration, previous.pending, previous.fenceGeneration))) continue;
             if (fired < 0) return ChainResult.acquired(chain.size() - 1, remaining);
             Cell state = states[fired];
             long retry = impossible >= 0 ? 0 : millisCeil(
@@ -149,25 +169,139 @@ public final class LocalRateLimitStore implements BatchRateLimitStore {
         List<BucketState> result = new ArrayList<>();
         for (AtomicReference<Version> domain : domains.values()) {
             Version previous = domain.get();
+            if (previous.pending != null) {
+                collectAll(previous.root, now, result);
+                continue;
+            }
             List<BucketIdentity> expired = new ArrayList<>();
             collect(previous.root, now, result, expired);
             if (!expired.isEmpty()) {
                 Node next = previous.root;
                 for (BucketIdentity key : expired) next = remove(next, key);
                 beforeCommit.run();
-                domain.compareAndSet(previous, new Version(next));
+                domain.compareAndSet(previous, new Version(next, previous.admissionGeneration, previous.pending, previous.fenceGeneration));
             }
         }
         return result;
     }
 
-    private static void collect(Node node, long now, List<BucketState> active, List<BucketIdentity> expired) {
+    private void collect(Node node, long now, List<BucketState> active, List<BucketIdentity> expired) {
         if (node == null) return;
         collect(node.left, now, active, expired);
         Cell state = normalize(node.cell, node.cell.limit, node.cell.algorithm, now);
         if (state.tokens == state.limit.capacity()) expired.add(node.key);
         else active.add(new BucketState(node.key, state.limit, state.algorithm, state.tokens));
         collect(node.right, now, active, expired);
+    }
+
+    public InitialCredit initialCredit() { return initialCredit; }
+
+    /** Stops future local commits. Older or already-resumed fence generations cannot be installed again. */
+    public void fence(RecoveryPending pending) {
+        Objects.requireNonNull(pending, "pending");
+        if (!bindings.containsDomain(pending.domain())) {
+            throw new io.quotaflow.core.PolicyConfigurationException("quota domain has no registered policies");
+        }
+        AtomicReference<Version> domain = domains.computeIfAbsent(pending.domain(),
+                ignored -> new AtomicReference<>(new Version(null)));
+        while (true) {
+            Version previous = domain.get();
+            if (previous.pending == pending || pending.generation() <= previous.fenceGeneration) return;
+            Version next = new Version(previous.root, advance(previous.admissionGeneration), pending, pending.generation());
+            if (domain.compareAndSet(previous, next)) return;
+        }
+    }
+
+    /** Only the holder of the current fence can resume admission. */
+    public boolean resume(RecoveryPending pending) {
+        AtomicReference<Version> domain = domains.get(pending.domain());
+        if (domain == null) return false;
+        while (true) {
+            Version previous = domain.get();
+            if (previous.pending != pending) return false;
+            Version next = new Version(previous.root, advance(previous.admissionGeneration), null, previous.fenceGeneration);
+            if (domain.compareAndSet(previous, next)) return true;
+        }
+    }
+
+    /** Retires a guard only under the exact current fence; callers first establish authoritative recovery. */
+    public boolean clearFenced(RecoveryPending pending) {
+        AtomicReference<Version> domain = domains.get(pending.domain());
+        if (domain == null) return false;
+        while (true) {
+            Version previous = domain.get();
+            if (previous.pending != pending) return false;
+            if (domain.compareAndSet(previous, new Version(null, previous.admissionGeneration, pending, previous.fenceGeneration))) return true;
+        }
+    }
+
+    /** Includes full cells; the recovery owner decides which accounting records are safe to retire. */
+    public List<BucketState> snapshotFenced(RecoveryPending pending) {
+        AtomicReference<Version> domain = domains.get(pending.domain());
+        if (domain == null) throw new IllegalStateException("recovery fence is not current");
+        Version version = domain.get();
+        if (version.pending != pending) throw new IllegalStateException("recovery fence is not current");
+        List<BucketState> result = new ArrayList<>();
+        collectAll(version.root, nanoClock.getAsLong(), result);
+        if (domain.get().pending != pending) throw new IllegalStateException("recovery fence retired during snapshot");
+        return List.copyOf(result);
+    }
+
+    /** Changes schedules while admissions remain fenced, preserving only known whole credit on a transition. */
+    public boolean constrainFenced(RecoveryPending pending, List<GuardConstraint> constraints) {
+        List<GuardConstraint> copy = List.copyOf(constraints);
+        java.util.Set<BucketIdentity> seen = new java.util.HashSet<>();
+        for (GuardConstraint c : copy) {
+            if (!c.key().domain().equals(pending.domain()) || !seen.add(c.key()))
+                throw new IllegalArgumentException("constraint domain mismatch or duplicate bucket");
+        }
+        bindings.register(copy.stream().map(c -> PolicyBinding.of(c.key(), c.algorithm())).toList());
+        AtomicReference<Version> domain = domains.get(pending.domain());
+        if (domain == null) return false;
+        while (true) {
+            Version previous = domain.get();
+            if (previous.pending != pending) return false;
+            long now = nanoClock.getAsLong();
+            Node next = previous.root;
+            for (GuardConstraint constraint : copy) {
+                Cell cell = find(next, constraint.key());
+                if (cell == null) continue;
+                if (constraint.effectiveLimit() == null) {
+                    next = remove(next, constraint.key());
+                } else {
+                    Limit limit = constraint.effectiveLimit();
+                    Cell normalized = constraint.resetSchedule()
+                            ? new Cell(Math.min(cell.tokens, limit.capacity()), 0,
+                                now - cell.timestamp < 0 ? cell.timestamp : now, limit, constraint.algorithm())
+                            : normalize(cell, limit, constraint.algorithm(), now);
+                    next = put(next, constraint.key(), normalized);
+                }
+            }
+            beforeCommit.run();
+            if (domain.compareAndSet(previous, new Version(next, previous.admissionGeneration, pending, previous.fenceGeneration))) return true;
+        }
+    }
+
+    /** Non-mutating weak observation, useful for a conservative retry hint after guarded dispatch. */
+    public java.util.Optional<BucketState> inspect(BucketIdentity key) {
+        AtomicReference<Version> domain = domains.get(key.domain());
+        Cell cell = domain == null ? null : find(domain.get().root, key);
+        if (cell == null) return java.util.Optional.empty();
+        Cell state = normalize(cell, cell.limit, cell.algorithm, nanoClock.getAsLong());
+        return java.util.Optional.of(new BucketState(key, state.limit, state.algorithm, state.tokens));
+    }
+
+    private void collectAll(Node node, long now, List<BucketState> result) {
+        if (node == null) return;
+        collectAll(node.left, now, result);
+        Cell state = normalize(node.cell, node.cell.limit, node.cell.algorithm, now);
+        result.add(new BucketState(node.key, state.limit, state.algorithm, state.tokens));
+        collectAll(node.right, now, result);
+    }
+
+    private static long advance(long generation) {
+        if (generation == Long.MAX_VALUE) throw new IllegalStateException("local admission generation exhausted");
+        return generation + 1;
     }
 
     public int cellCount() {
@@ -240,8 +374,8 @@ public final class LocalRateLimitStore implements BatchRateLimitStore {
         Node pivot = node.left;
         return new Node(pivot.key, pivot.cell, pivot.left, new Node(node.key, node.cell, pivot.right, node.right));
     }
-    private static Cell normalize(Cell state, Limit limit, Algorithm algorithm, long now) {
-        if (state == null) return new Cell(limit.capacity(), 0, now, limit, algorithm);
+    private Cell normalize(Cell state, Limit limit, Algorithm algorithm, long now) {
+        if (state == null) return new Cell(initialCredit == InitialCredit.FULL ? limit.capacity() : 0, 0, now, limit, algorithm);
         // Signed subtraction supports nanoTime wrap for elapsed durations below 2^63 ns.
         long elapsed = now - state.timestamp;
         long timestamp = elapsed < 0 ? state.timestamp : now;

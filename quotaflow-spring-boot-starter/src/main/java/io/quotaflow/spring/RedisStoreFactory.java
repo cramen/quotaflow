@@ -19,12 +19,13 @@ final class RedisStoreFactory {
     private RedisStoreFactory() {
     }
 
-    /** Opens a client and a dedicated connection; both are closed by the returned holder. */
-    static PrimaryStoreHolder connect(QuotaFlowProperties.Redis properties) {
-        RedisStoreConfig config = new RedisStoreConfig(
-                properties.getCommandTimeout(), properties.getBusinessTimeout());
-        RedisRateLimitStore store =
-                RedisRateLimitStore.connect(properties.getUrl(), config, properties.getConnectTimeout());
-        return new PrimaryStoreHolder(store, store, store::close);
+    static io.quotaflow.fallback.ReconnectingRecoveryPrimary.Connection recoveryConnection(QuotaFlowProperties.Redis properties, String namespace) {
+        RedisStoreConfig config = new RedisStoreConfig(properties.getCommandTimeout(), properties.getBusinessTimeout());
+        RedisRateLimitStore store = RedisRateLimitStore.connect(properties.getUrl(), config, properties.getConnectTimeout());
+        try {
+            return new io.quotaflow.fallback.ReconnectingRecoveryPrimary.Connection(
+                    store.recoveryPrimary(namespace, properties.getCommandTimeout(), true), store);
+        } catch (RuntimeException | LinkageError failure) { store.close(); throw failure; }
     }
+
 }

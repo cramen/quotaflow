@@ -22,6 +22,8 @@ import io.quotaflow.core.store.LevelRequest;
 import io.quotaflow.core.store.StateSeeder;
 import io.quotaflow.core.store.StoreResult;
 import io.quotaflow.core.store.StateCompatibilityException;
+import io.quotaflow.core.store.RecoveryContext;
+import io.quotaflow.core.store.RecoveryPending;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -46,22 +48,24 @@ import java.util.concurrent.TimeUnit;
  * timeout, which is validated to be strictly below the business timeout (see
  * {@link RedisStoreConfig}).
  */
-public final class RedisRateLimitStore implements BatchRateLimitStore, StateSeeder, AutoCloseable {
+public class RedisRateLimitStore implements BatchRateLimitStore, StateSeeder, AutoCloseable {
 
     private static final String ALGORITHM_TOKEN_BUCKET = "tb";
     private static final String ALGORITHM_GCRA = "gcra";
 
+    private final java.util.concurrent.atomic.AtomicBoolean closed = new java.util.concurrent.atomic.AtomicBoolean();
     private final StatefulConnection<String, String> connection;
     private final RedisScriptingAsyncCommands<String, String> async;
     private final boolean closeConnection;
     private final RedisClient ownedClient;
     private final RedisStoreConfig config;
     private final RedisKeyScheme keyScheme;
-    private final LuaScript tokenBucketScript;
-    private final LuaScript gcraScript;
-    private final LuaScript chainScript;
-    private final LuaScript seedScript;
     private final LuaScript registerScript;
+    private final LuaScript guardedChain = LuaScript.coordinated("/lua/chain.lua", "acquire");
+    private final LuaScript guardedSeed = LuaScript.coordinated("/lua/seed.lua", "seed");
+    private record BoundContext(RecoveryContext context, io.quotaflow.core.store.RecoveryPending pending,
+                                CompletableFuture<Void> changed) { }
+    private final ConcurrentHashMap<QuotaDomain, BoundContext> boundContexts = new ConcurrentHashMap<>();
     private final java.util.Set<PolicyBinding> verifiedBindings = ConcurrentHashMap.newKeySet();
 
     /** Store over a caller-managed standalone connection; {@link #close()} does not close it. */
@@ -124,8 +128,18 @@ public final class RedisRateLimitStore implements BatchRateLimitStore, StateSeed
         }
     }
 
+    /** Creates a controller adapter on this store's transport; borrowed transports require an explicit no-replay attestation. */
+    @SuppressWarnings("unchecked")
+    public RedisRecoveryPrimary recoveryPrimary(String namespace, Duration timeout, boolean acquisitionsNeverReplayed) {
+        if (connection instanceof StatefulRedisConnection<?, ?> standalone)
+            return new RedisRecoveryPrimary(namespace, (StatefulRedisConnection<String, String>) standalone,
+                    this, timeout, acquisitionsNeverReplayed);
+        return new RedisRecoveryPrimary(namespace, (StatefulRedisClusterConnection<String, String>) connection,
+                this, timeout, acquisitionsNeverReplayed);
+    }
+
     private static RedisRateLimitStore connectOnce(String url, RedisStoreConfig config, Duration connectTimeout) {
-        RedisClient client = RedisClientFactory.createClient(url, connectTimeout);
+        RedisClient client = RedisClientFactory.createClient(url, connectTimeout, config.commandTimeout());
         try {
             StatefulRedisConnection<String, String> connection = client.connect();
             return new RedisRateLimitStore(
@@ -153,10 +167,6 @@ public final class RedisRateLimitStore implements BatchRateLimitStore, StateSeed
         this.keyScheme = Objects.requireNonNull(keyScheme, "keyScheme");
         this.closeConnection = closeConnection;
         this.ownedClient = ownedClient;
-        this.tokenBucketScript = LuaScript.load("/lua/token_bucket.lua");
-        this.gcraScript = LuaScript.load("/lua/gcra.lua");
-        this.chainScript = LuaScript.load("/lua/chain.lua");
-        this.seedScript = LuaScript.load("/lua/seed.lua");
         this.registerScript = LuaScript.load("/lua/register_policies.lua");
     }
 
@@ -205,87 +215,113 @@ public final class RedisRateLimitStore implements BatchRateLimitStore, StateSeed
         return registerPolicies(missing).thenCompose(ignored -> evalWithFallback(script, keys, args));
     }
 
+    @Override public boolean requiresVersionedLimits() { return true; }
+
     @Override
     public StoreResult tryAcquire(BucketIdentity storageKey, Limit limit, Algorithm algorithm, long weight) {
         return tryAcquireAsync(storageKey, limit, algorithm, weight).toCompletableFuture().join();
     }
 
-    @Override
-    public CompletionStage<StoreResult> tryAcquireAsync(
-            BucketIdentity storageKey, Limit limit, Algorithm algorithm, long weight) {
-        Objects.requireNonNull(storageKey, "storageKey");
-        Objects.requireNonNull(limit, "limit");
-        Objects.requireNonNull(algorithm, "algorithm");
-        Limit.validateWeight(weight);
-        LuaScript script = algorithm == Algorithm.TOKEN_BUCKET ? tokenBucketScript : gcraScript;
-        String[] keys = {keyScheme.singleKey(storageKey)};
-        String[] args = limitArgs(limit, algorithm, weight);
-        return evalRegistered(script, keys, args, List.of(PolicyBinding.of(storageKey, algorithm)))
-                .thenApply(RedisRateLimitStore::toStoreResult);
-    }
-
-    @Override
-    public CompletionStage<ChainResult> tryAcquireAll(List<LevelRequest> chain) {
-        LevelRequest.validateChain(chain);
-        List<BucketIdentity> storageKeys = chain.stream().map(LevelRequest::storageKey).toList();
-        String[] keys = keyScheme.chainKeys(storageKeys).toArray(String[]::new);
-        String[] args = new String[chain.size() * 5];
-        for (int i = 0; i < chain.size(); i++) {
-            LevelRequest level = chain.get(i);
-            int base = i * 5;
-            args[base] = algorithmTag(level.algorithm());
-            args[base + 1] = Long.toString(level.limit().capacity());
-            args[base + 2] = Long.toString(level.limit().emissionIntervalNanos());
-            args[base + 3] = ParameterFingerprint.of(level.algorithm(), level.limit());
-            args[base + 4] = Long.toString(level.weight());
-        }
-        return evalRegistered(chainScript, keys, args, chain.stream().map(level -> PolicyBinding.of(level.storageKey(), level.algorithm())).toList())
-                .thenApply(RedisRateLimitStore::toChainResult);
-    }
-
     /**
-     * Recovery codec seeding: one atomic {@code seed.lua} execution per domain
-     * batch, merging each remaining balance conservatively into the
-     * stored state (never increasing remaining). Keys are mapped exactly like
-     * the chain script maps them, so seeded state is what post-recovery chain
-     * evaluations read. Each write is bounded by the configured command
-     * timeout; the stage completes exceptionally if any write fails.
+     * Binds an externally validated controller context for the plain store SPI. Advanced clients must
+     * publish each new context explicitly; stale contexts return pending and never refresh themselves.
+     * The conservative fallback coordinator uses context-bearing overloads directly instead.
      */
-    @Override
-    public CompletionStage<Void> seed(QuotaDomain domain, List<BucketState> buckets) {
-        Objects.requireNonNull(domain, "domain");
-        Objects.requireNonNull(buckets, "buckets");
-        if (buckets.isEmpty()) {
-            return CompletableFuture.completedFuture(null);
-        }
-        List<BucketState> snapshot = List.copyOf(buckets);
-        // Validate the entire batch before the first write, including its domain.
-        java.util.Set<BucketIdentity> identities = new java.util.HashSet<>();
-        for (BucketState bucket : snapshot) {
-            keyScheme.chainLevelKey(domain, bucket.storageKey());
-            if (!identities.add(bucket.storageKey())) throw new IllegalArgumentException("seed batch repeats a canonical bucket");
-        }
-        return registerPolicies(snapshot.stream().map(bucket -> PolicyBinding.of(bucket.storageKey(), bucket.algorithm())).distinct().toList())
-                .thenCompose(ignored -> seedRegistered(snapshot));
+    public void bindRecoveryContext(RecoveryContext context) {
+        if (closed.get()) throw new IllegalStateException("Redis store is closed");
+        Objects.requireNonNull(context, "context");
+        if (verifiedBindings.stream().noneMatch(binding -> binding.domain().equals(context.domain())))
+            throw new io.quotaflow.core.PolicyConfigurationException("recovery context requires a registered domain");
+        CompletableFuture<Void> changed = new CompletableFuture<>();
+        var pending = new RecoveryPending(context.domain(), context.dispatchGeneration(), changed);
+        BoundContext previous = boundContexts.put(context.domain(), new BoundContext(context, pending, changed));
+        if (previous != null) previous.changed().complete(null);
+    }
+    private BoundContext bound(QuotaDomain domain) {
+        BoundContext context = boundContexts.get(domain);
+        if (context == null) throw new io.quotaflow.core.PolicyConfigurationException(
+                "Redis acquisitions and seeds require an explicit recovery context; use the fixed-cohort fallback coordinator or bind a validated context");
+        return context;
+    }
+    @Override public CompletionStage<StoreResult> tryAcquireAsync(
+            BucketIdentity storageKey, Limit limit, Algorithm algorithm, long weight) {
+        return tryAcquireAll(List.of(new LevelRequest(storageKey, limit, algorithm, weight))).thenApply(result ->
+                new StoreResult(result.acquired(), result.remaining(), result.retryAfterMillis(), result.recoveryPending()));
+    }
+    @Override public CompletionStage<ChainResult> tryAcquireAll(List<LevelRequest> chain) {
+        List<LevelRequest> requests = List.copyOf(chain); LevelRequest.validateChain(requests);
+        BoundContext binding = bound(requests.get(0).storageKey().domain());
+        return tryAcquireAll(binding.context(), requests, false, binding.pending());
+    }
+    /** Context-free seeders cannot establish recovery; the bound controller must authorize this write. */
+    @Override public CompletionStage<Void> seed(QuotaDomain domain, List<BucketState> buckets) {
+        BoundContext binding = bound(domain);
+        return seed(binding.context(), buckets).thenApply(applied -> {
+            if (!applied) throw new IllegalStateException("seed recovery context is stale; no bucket was changed");
+            return null;
+        });
     }
 
-    private CompletionStage<Void> seedRegistered(List<BucketState> buckets) {
-        String[] keys = new String[buckets.size()];
-        String[] args = new String[buckets.size() * 5];
-        for (int i = 0; i < buckets.size(); i++) {
-            BucketState bucket = buckets.get(i);
-            keys[i] = keyScheme.singleKey(bucket.storageKey());
-            args[i * 5] = algorithmTag(bucket.algorithm());
-            args[i * 5 + 1] = Long.toString(bucket.limit().capacity());
-            args[i * 5 + 2] = Long.toString(bucket.limit().emissionIntervalNanos());
-            args[i * 5 + 3] = ParameterFingerprint.of(bucket.algorithm(), bucket.limit());
-            args[i * 5 + 4] = Long.toString(bucket.remaining());
+    /** Context-bound atomic acquisition. The coordinator supplies a shared, generation-scoped pending signal. */
+    public CompletionStage<ChainResult> tryAcquireAll(RecoveryContext context, List<LevelRequest> chain,
+                                                     boolean guarded, RecoveryPending pending) {
+        if (closed.get()) return CompletableFuture.failedFuture(new IllegalStateException("Redis store is closed"));
+        List<LevelRequest> requests = List.copyOf(chain);
+        LevelRequest.validateChain(requests);
+        if (!context.domain().equals(pending.domain())) throw new IllegalArgumentException("pending domain mismatch");
+        for (LevelRequest request : requests) {
+            if (request.resolverRevision() != context.resolverRevision() || !request.resolverFingerprint().equals(context.resolverFingerprint())
+                    || (request.configurationFingerprint() != null && !request.configurationFingerprint().equals(context.configurationFingerprint())))
+                return CompletableFuture.completedFuture(ChainResult.pending(0, pending));
         }
-        return evalWithFallback(seedScript, keys, args).thenApply(reply -> null);
+        List<String> keys = new ArrayList<>();
+        keys.add(keyScheme.controlKey(context.domain()));
+        List<String> args = operationHeader(context, guarded);
+        for (LevelRequest request : requests) {
+            if (!request.storageKey().domain().equals(context.domain())) throw new IllegalArgumentException("operation domain mismatch");
+            keys.add(keyScheme.singleKey(request.storageKey()));
+            args.addAll(List.of(algorithmTag(request.algorithm()), Long.toString(request.limit().capacity()),
+                    Long.toString(request.limit().emissionIntervalNanos()), ParameterFingerprint.of(request.algorithm(), request.limit()),
+                    Long.toString(request.weight())));
+        }
+        return evalRegistered(guardedChain, keys.toArray(String[]::new), args.toArray(String[]::new),
+                requests.stream().map(r -> PolicyBinding.of(r.storageKey(), r.algorithm())).toList())
+                .thenApply(reply -> number(reply, 0) == -20 ? ChainResult.pending(0, pending) : toChainResult(reply));
+    }
+
+    /** A stale context returns false without normalizing or writing any bucket. */
+    public CompletionStage<Boolean> seed(RecoveryContext context, List<BucketState> buckets) {
+        if (closed.get()) return CompletableFuture.failedFuture(new IllegalStateException("Redis store is closed"));
+        List<BucketState> snapshot = List.copyOf(buckets);
+        List<String> keys = new ArrayList<>(); keys.add(keyScheme.controlKey(context.domain()));
+        List<String> args = operationHeader(context, false);
+        java.util.Set<BucketIdentity> seen = new java.util.HashSet<>();
+        for (BucketState bucket : snapshot) {
+            if (!bucket.storageKey().domain().equals(context.domain()) || !seen.add(bucket.storageKey()))
+                throw new IllegalArgumentException("seed domain mismatch or duplicate identity");
+            keys.add(keyScheme.singleKey(bucket.storageKey()));
+            args.addAll(List.of(algorithmTag(bucket.algorithm()), Long.toString(bucket.limit().capacity()),
+                    Long.toString(bucket.limit().emissionIntervalNanos()), ParameterFingerprint.of(bucket.algorithm(), bucket.limit()),
+                    Long.toString(bucket.remaining())));
+        }
+        return registerPolicies(snapshot.stream().map(b -> PolicyBinding.of(b.storageKey(), b.algorithm())).toList())
+                .thenCompose(ignored -> evalWithFallback(guardedSeed, keys.toArray(String[]::new), args.toArray(String[]::new)))
+                .thenApply(reply -> number(reply, 0) != -20);
+    }
+
+    private static List<String> operationHeader(RecoveryContext c, boolean guarded) {
+        return new ArrayList<>(List.of("qf-recovery-v1", c.session().cohortIncarnation(), c.session().cohortDigest(),
+                Integer.toString(c.session().slot()), Long.toString(c.session().generation()), c.session().token(),
+                Long.toString(c.epoch()), Long.toString(c.dispatchGeneration()), Long.toString(c.configurationVersion()),
+                c.configurationFingerprint(), c.phase().name(), guarded ? "1" : "0",
+                Long.toString(c.resolverRevision()), c.resolverFingerprint()));
     }
 
     @Override
     public void close() {
+        if (!closed.compareAndSet(false, true)) return;
+        boundContexts.values().forEach(binding -> binding.changed().completeExceptionally(new java.util.concurrent.CancellationException("Redis store closed")));
+        boundContexts.clear();
         if (closeConnection) {
             connection.close();
         }
@@ -323,7 +359,7 @@ public final class RedisRateLimitStore implements BatchRateLimitStore, StateSeed
                     Throwable cause = error;
                     while (cause instanceof CompletionException && cause.getCause() != null) cause = cause.getCause();
                     if (cause instanceof RedisCommandExecutionException && cause.getMessage() != null
-                            && cause.getMessage().contains("QF_STATE")) {
+                            && (cause.getMessage().contains("QF_STATE") || cause.getMessage().contains("QF_RECOVERY_"))) {
                         throw new StateCompatibilityException("quota state is incompatible or corrupt; drain migration or operator repair is required");
                     }
                     throw new CompletionException(cause);

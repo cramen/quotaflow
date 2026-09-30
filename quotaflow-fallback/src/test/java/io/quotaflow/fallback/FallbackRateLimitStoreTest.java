@@ -1,538 +1,302 @@
 package io.quotaflow.fallback;
 
-import static io.quotaflow.testing.TestIdentities.key;
-import io.quotaflow.core.store.BucketIdentity;
-import io.quotaflow.core.store.QuotaDomain;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
-import io.quotaflow.core.Algorithm;
-import io.quotaflow.core.Limit;
-import io.quotaflow.core.Verdict;
-import io.quotaflow.core.store.BatchRateLimitStore;
-import io.quotaflow.core.store.BucketState;
-import io.quotaflow.core.store.ChainResult;
-import io.quotaflow.core.store.LevelRequest;
-import io.quotaflow.core.store.LocalRateLimitStore;
-import io.quotaflow.core.store.StateSeeder;
-import io.quotaflow.core.store.StoreResult;
+import static org.junit.jupiter.api.Assertions.*;
+import io.quotaflow.core.*;
+import io.quotaflow.core.store.*;
+import io.quotaflow.testing.RecoveryPrimaryFixture;
 import java.time.Duration;
-import java.util.List;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
-import java.util.concurrent.CompletionStage;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
-/**
- * The fallback store end to end with a controllable fake primary: passthrough
- * while healthy, local decisions with zero primary calls while open,
- * conservative scaling, probe-based recovery with state seeding, and listener
- * observability through a full outage-recovery cycle.
- */
 class FallbackRateLimitStoreTest {
-
-    private static final long SECOND = 1_000_000_000L;
-    private static final long HOUR_NANOS = 3_600_000_000_000L;
-
-    /** Controllable primary: delegates to a real local store while healthy, fails on demand. */
-    private static class FakePrimary implements BatchRateLimitStore {
-        private final io.quotaflow.core.store.LocalPolicyBindings policyBindings =
-                new io.quotaflow.core.store.LocalPolicyBindings();
-
-        @Override
-        public java.util.concurrent.CompletionStage<Void> registerPolicies(
-                java.util.List<io.quotaflow.core.store.PolicyBinding> bindings) {
-            policyBindings.register(bindings);
-            return java.util.concurrent.CompletableFuture.completedFuture(null);
+    private static final Duration TIMEOUT = Duration.ofSeconds(2);
+    private static PolicySet policies(Algorithm algorithm, long capacity, long refill) {
+        return PolicySet.compile(List.of(RateLimitPolicy.builder("quota").scope(Scope.GLOBAL)
+                .algorithm(algorithm).limit(new Limit(capacity, refill, Duration.ofSeconds(1))).build()));
+    }
+    private static RecoverySettings settings(int instances, int cap) {
+        List<String> members = java.util.stream.IntStream.range(0, instances).mapToObj(Integer::toString).toList();
+        return new RecoverySettings("default", "test", "0", new RecoveryCohort(members), cap, 2,
+                Duration.ofMillis(10), TIMEOUT);
+    }
+    static void await(java.util.function.BooleanSupplier condition) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (System.nanoTime() < deadline) {
+            if (condition.getAsBoolean()) return;
+            Thread.sleep(5);
         }
-
-        private final LocalRateLimitStore delegate;
-        volatile boolean failing;
-        final AtomicInteger batchCalls = new AtomicInteger();
-        final AtomicInteger singleCalls = new AtomicInteger();
-
-        FakePrimary(LocalRateLimitStore delegate) {
-            this.delegate = delegate;
-        }
-
-        @Override
-        public CompletionStage<ChainResult> tryAcquireAll(List<LevelRequest> chain) {
-            batchCalls.incrementAndGet();
-            if (failing) {
-                return CompletableFuture.failedFuture(new RuntimeException("store is down"));
-            }
-            return delegate.tryAcquireAll(chain);
-        }
-
-        @Override
-        public StoreResult tryAcquire(BucketIdentity storageKey, Limit limit, Algorithm algorithm, long weight) {
-            singleCalls.incrementAndGet();
-            if (failing) {
-                throw new RuntimeException("store is down");
-            }
-            return delegate.tryAcquire(key(storageKey), limit, algorithm, weight);
-        }
-
-        @Override
-        public CompletionStage<StoreResult> tryAcquireAsync(
-                BucketIdentity storageKey, Limit limit, Algorithm algorithm, long weight) {
-            singleCalls.incrementAndGet();
-            if (failing) {
-                return CompletableFuture.failedFuture(new RuntimeException("store is down"));
-            }
-            return delegate.tryAcquireAsync(key(storageKey), limit, algorithm, weight);
+        assertTrue(condition.getAsBoolean(), "recovery condition did not become true");
+    }
+    @Test void oldStoreAndNoOpSeederCannotAuthorizeRecovery() {
+        assertThrows(IllegalArgumentException.class, () -> new FallbackRateLimitStore(new LocalRateLimitStore(),
+                StateSeeder.noOp(), FallbackConfig.defaults(), List.of()));
+    }
+    @ParameterizedTest @EnumSource(Algorithm.class)
+    void coldSharesDivideBothBurstAndRefillAndNewOutagesRetireOldGuards(Algorithm algorithm) throws Exception {
+        var policies = policies(algorithm, 100, 100);
+        var primary = new RecoveryPrimaryFixture(policies);
+        var time = new AtomicLong();
+        try (var store = new FallbackRateLimitStore(primary, settings(4, 10), List.of(), time::get)) {
+            var flow = DefaultQuotaFlow.builder(policies, store).build();
+            await(() -> store.state() == DegradationState.CLOSED);
+            primary.available = false;
+            assertFalse(flow.tryAcquire("quota", RateLimitContext.empty()).isAllowed());
+            assertFalse(flow.tryAcquire("quota", RateLimitContext.empty()).isAllowed());
+            time.set(500_000_000L);
+            assertFalse(flow.tryAcquire("quota", RateLimitContext.empty(), 25).isAllowed());
+            time.set(TimeUnit.SECONDS.toNanos(1));
+            assertTrue(flow.tryAcquire("quota", RateLimitContext.empty(), 25).isAllowed());
+            assertFalse(flow.tryAcquire("quota", RateLimitContext.empty()).isAllowed());
+            time.set(1_500_000_000L);
+            assertFalse(flow.tryAcquire("quota", RateLimitContext.empty(), 25).isAllowed());
+            time.set(TimeUnit.SECONDS.toNanos(2));
+            assertTrue(flow.tryAcquire("quota", RateLimitContext.empty(), 10).isAllowed());
+            primary.available = true;
+            time.addAndGet(TimeUnit.SECONDS.toNanos(1));
+            await(() -> store.state() == DegradationState.CLOSED);
+            assertEquals(0, store.trackedBuckets());
+            primary.available = false;
+            assertFalse(flow.tryAcquire("quota", RateLimitContext.empty()).isAllowed());
+            assertFalse(flow.tryAcquire("quota", RateLimitContext.empty()).isAllowed(), "a new outage must not revive retired balance");
         }
     }
-
-    private static final class RecordingSeeder implements StateSeeder {
-        final List<QuotaDomain> domains = new CopyOnWriteArrayList<>();
-        final List<List<BucketState>> buckets = new CopyOnWriteArrayList<>();
-        volatile boolean fail;
-
-        @Override
-        public CompletionStage<Void> seed(QuotaDomain chainLeafStorageKey, List<BucketState> entries) {
-            domains.add(chainLeafStorageKey);
-            buckets.add(entries);
-            return fail
-                    ? CompletableFuture.failedFuture(new RuntimeException("seed write failed"))
-                    : CompletableFuture.completedFuture(null);
-        }
-
-        int totalSeeded() {
-            return buckets.stream().mapToInt(List::size).sum();
+    @ParameterizedTest @EnumSource(Algorithm.class)
+    void infeasibleSharesAreDataRejectionsWithoutSchedulesOrTracking(Algorithm algorithm) throws Exception {
+        var policies = policies(algorithm, 3, 1);
+        var primary = new RecoveryPrimaryFixture(policies);
+        try (var store = new FallbackRateLimitStore(primary, settings(4, 10), List.of())) {
+            var flow = DefaultQuotaFlow.builder(policies, store).build();
+            await(() -> store.state() == DegradationState.CLOSED);
+            assertTrue(flow.tryAcquire("quota", RateLimitContext.empty()).isAllowed(), "small healthy policies remain valid");
+            primary.available = false;
+            flow.tryAcquire("quota", RateLimitContext.empty());
+            var result = store.tryAcquire(new BucketIdentity(new QuotaDomain("default", "quota"), "quota", Scope.GLOBAL, "all"),
+                    policies.policy("quota").limit().orElseThrow(), algorithm, 1);
+            assertFalse(result.acquired()); assertEquals(0, result.remaining()); assertEquals(0, result.retryAfterMillis());
+            assertEquals(0, store.trackedBuckets());
         }
     }
-
-    private static final class RecordingListener implements DegradationListener {
-        final List<String> transitions = new CopyOnWriteArrayList<>();
-        final List<String> decisions = new CopyOnWriteArrayList<>();
-
-        @Override
-        public void onTransition(DegradationState from, DegradationState to, String reason) {
-            transitions.add(from + "->" + to + ":" + reason);
-        }
-
-        @Override
-        public void onFallbackDecision(String policyId, String keyGroup, Verdict verdict) {
-            decisions.add(policyId + "/" + keyGroup + "/" + verdict);
-        }
-    }
-
-    private final AtomicLong nanos = new AtomicLong();
-    private final LocalRateLimitStore delegate = new LocalRateLimitStore(nanos::get);
-    private final LocalRateLimitStore local = new LocalRateLimitStore(nanos::get);
-    private final FakePrimary primary = new FakePrimary(delegate);
-    private final RecordingSeeder seeder = new RecordingSeeder();
-    private final RecordingListener listener = new RecordingListener();
-
-    private FallbackRateLimitStore newStore(int expectedInstances, int maxSeedEntries) {
-        FallbackConfig config = new FallbackConfig(3, Duration.ofSeconds(1), Duration.ofSeconds(4),
-                expectedInstances, maxSeedEntries);
-        return new FallbackRateLimitStore(primary, local, seeder, config, List.of(listener),
-                nanos::get, FallbackRateLimitStoreTest::scopeAsKeyGroup);
-    }
-
-    private static String scopeAsKeyGroup(BucketIdentity storageKey) {
-        return storageKey.scope().wireName();
-    }
-
-    private static List<LevelRequest> chain(String key, Limit limit) {
-        return List.of(new LevelRequest(key(key), limit, Algorithm.TOKEN_BUCKET, 1));
-    }
-
-    private static ChainResult join(FallbackRateLimitStore store, List<LevelRequest> chain) {
-        return store.tryAcquireAll(chain).toCompletableFuture().join();
-    }
-
-    /** No refill during a test: one token per hour. */
-    private static Limit noRefill(long capacity) {
-        return new Limit(capacity, 1, Duration.ofHours(1));
-    }
-
-    /** Trips the breaker with three failing calls on a fast-refilling throwaway key. */
-    private void trip(FallbackRateLimitStore store) {
-        primary.failing = true;
-        Limit fastRefill = new Limit(1, 1000, Duration.ofSeconds(1));
-        for (int i = 0; i < 3; i++) {
-            join(store, chain("trip:global:t", fastRefill));
-        }
-        assertEquals(DegradationState.OPEN, store.state());
-    }
-
-    @Test
-    void closedPassesThroughUnchanged() {
-        FallbackRateLimitStore store = newStore(1, 100);
-        Limit limit = noRefill(10);
-        List<LevelRequest> chain = chain("p:tenant:acme", limit);
-        ChainResult viaWrapper = join(store, chain);
-        assertTrue(viaWrapper.acquired());
-        assertEquals(9, viaWrapper.remaining());
-        assertEquals(1, primary.batchCalls.get());
-        assertEquals(0, local.cellCount(), "the local store is untouched while healthy");
-        assertTrue(listener.transitions.isEmpty());
-        assertTrue(listener.decisions.isEmpty());
-    }
-
-    @Test
-    void openServesLocallyWithZeroPrimaryCalls() {
-        FallbackRateLimitStore store = newStore(1, 100);
-        Limit limit = noRefill(10);
-        trip(store);
-        int callsAtOpen = primary.batchCalls.get();
-        for (int i = 0; i < 5; i++) {
-            assertTrue(join(store, chain("p:tenant:acme", limit)).acquired());
-        }
-        assertEquals(callsAtOpen, primary.batchCalls.get(), "OPEN mode makes zero primary calls");
-        assertTrue(local.cellCount() >= 2, "local state exists for the served keys");
-        assertEquals(5 + 3, listener.decisions.size(), "every locally served request is reported");
-    }
-
-    @Test
-    void callerErrorsPropagateWithoutDegrading() {
-        FallbackRateLimitStore store = newStore(1, 100);
-        Limit limit = noRefill(10);
-        assertThrows(IllegalArgumentException.class,
-                () -> store.tryAcquire(key("p:tenant:acme"), limit, Algorithm.TOKEN_BUCKET, 0));
-        assertThrows(IllegalArgumentException.class, () -> store.tryAcquireAll(List.of()));
-        assertEquals(DegradationState.CLOSED, store.state());
-        assertTrue(join(store, chain("p:tenant:acme", limit)).acquired());
-    }
-
-    @Test
-    void tokenBucketScalingRetainsFractionalRateWithoutRoundingUpZeroBurst() {
-        FallbackRateLimitStore store = newStore(4, 100);
-        trip(store);
-        // capacity 8 / 4 = 2, refill 8 / 4 = 2 per second -> 500 ms per token
-        Limit limit = new Limit(8, 8, Duration.ofSeconds(1));
-        List<LevelRequest> chain = chain("p:tenant:acme", limit);
-        ChainResult first = join(store, chain);
-        ChainResult second = join(store, chain);
-        ChainResult rejected = join(store, chain);
-        assertTrue(first.acquired());
-        assertEquals(1, first.remaining());
-        assertTrue(second.acquired());
-        assertEquals(0, second.remaining());
-        assertFalse(rejected.acquired());
-        assertEquals(0, rejected.firedLevelIndex());
-        assertEquals(500, rejected.retryAfterMillis());
-
-        // A zero derived burst cannot be rounded upward into a positive limit.
-        Limit tiny = new Limit(3, 2, Duration.ofSeconds(1));
-        List<LevelRequest> tinyChain = chain("p:tenant:other", tiny);
-        assertFalse(join(store, tinyChain).acquired());
-        ChainResult tinyRejected = join(store, tinyChain);
-        assertFalse(tinyRejected.acquired());
-        assertEquals(0, tinyRejected.retryAfterMillis());
-    }
-
-    @Test
-    void scaledDecisionsMatchHealthyModeShape() {
-        // healthy reference: the scaled limit evaluated by the same local batch path
-        LocalRateLimitStore reference = new LocalRateLimitStore(nanos::get);
-        Limit scaled = new Limit(2, 2, Duration.ofSeconds(1));
-        FallbackRateLimitStore store = newStore(4, 100);
-        trip(store);
-        Limit limit = new Limit(8, 8, Duration.ofSeconds(1));
-        for (int i = 0; i < 3; i++) {
-            ChainResult degraded = join(store, chain("p:tenant:acme", limit));
-            ChainResult healthy = reference.tryAcquireAll(
-                    List.of(new LevelRequest(key("p:tenant:acme"), scaled, Algorithm.TOKEN_BUCKET, 1)))
-                    .toCompletableFuture().join();
-            assertEquals(healthy, degraded,
-                    "fired level, remaining and retry-after are computed identically");
-        }
-    }
-
-    @Test
-    void gcraScalingMultipliesTheEmissionInterval() {
-        FallbackRateLimitStore store = newStore(2, 100);
-        trip(store);
-        // healthy interval 250 ms; degraded interval 500 ms; burst capacity unchanged
-        Limit limit = new Limit(4, 4, Duration.ofSeconds(1));
-        List<LevelRequest> chain = List.of(new LevelRequest(key("p:tenant:acme"), limit, Algorithm.GCRA, 1));
-        for (long expectedRemaining = 3; expectedRemaining >= 0; expectedRemaining--) {
-            ChainResult result = join(store, chain);
-            assertTrue(result.acquired());
-            assertEquals(expectedRemaining, result.remaining());
-        }
-        ChainResult rejected = join(store, chain);
-        assertFalse(rejected.acquired());
-        assertEquals(500, rejected.retryAfterMillis());
-    }
-
-    @Test
-    void recoveryReplaysScaledLocalStateTranslatedToFullLimitThenCloses() {
-        FallbackRateLimitStore store = newStore(2, 100);
-        Limit limit = noRefill(10);
-        trip(store); // three locally served calls on the trip key
-        List<LevelRequest> chain = chain("p:tenant:acme", limit);
-        join(store, chain); // local scaled capacity 5, consumes 1 -> remaining 4
-        ChainResult second = join(store, chain);
-        assertEquals(3, second.remaining());
-
-        primary.failing = false;
-        nanos.addAndGet(SECOND);
-        ChainResult probe = join(store, chain);
-        assertTrue(probe.acquired(), "the probe rides a real request to the healed primary");
-        assertEquals(9, probe.remaining(), "the probe consumed from the distributed bucket");
-
-        assertEquals(DegradationState.CLOSED, store.state());
-        assertEquals(1, seeder.domains.size());
-        assertEquals(key("p:tenant:acme").domain(), seeder.domains.get(0));
-        List<BucketState> seeded = seeder.buckets.get(0);
-        assertEquals(1, seeded.size(), "the refilled trip key was swept from the snapshot");
-        BucketState bucket = seeded.get(0);
-        assertEquals(key("p:tenant:acme"), bucket.storageKey());
-        assertEquals(limit, bucket.limit(), "seeding uses the original unscaled limit");
-        // local remaining 3 out of scaled capacity 5 -> 3 * 2 = 6 of the shared capacity unused
-        assertEquals(6, bucket.remaining());
-
-        ChainResult afterRecovery = join(store, chain);
-        assertTrue(afterRecovery.acquired());
-        assertEquals(8, afterRecovery.remaining(), "post-recovery decisions are distributed again");
-        assertEquals(List.of(
-                "CLOSED->OPEN:primary store call failed (RuntimeException)",
-                "OPEN->HALF_OPEN:open duration elapsed; admitting one probe request",
-                "HALF_OPEN->CLOSED:probe succeeded and 1 local buckets replayed"),
-                listener.transitions);
-    }
-
-    @Test
-    void seedingFailureExtendsOpenAndRecoveryRetriesLater() {
-        FallbackRateLimitStore store = newStore(2, 100);
-        Limit limit = noRefill(10);
-        trip(store);
-        join(store, chain("p:tenant:acme", limit));
-        seeder.fail = true;
-        primary.failing = false;
-        nanos.addAndGet(SECOND);
-        assertTrue(join(store, chain("p:tenant:acme", limit)).acquired(), "probe succeeds");
-        assertEquals(DegradationState.OPEN, store.state(), "seeding failure extends the outage");
-        int primaryCallsAfterFailedSeed = primary.batchCalls.get();
-        join(store, chain("p:tenant:acme", limit));
-        assertEquals(primaryCallsAfterFailedSeed, primary.batchCalls.get(),
-                "still zero primary calls while reopened");
-
-        seeder.fail = false;
-        nanos.addAndGet(SECOND);
-        join(store, chain("p:tenant:acme", limit));
-        assertEquals(DegradationState.OPEN, store.state(), "backoff doubled the open duration");
-        nanos.addAndGet(SECOND);
-        join(store, chain("p:tenant:acme", limit));
-        assertEquals(DegradationState.CLOSED, store.state());
-        assertTrue(listener.transitions.contains(
-                "HALF_OPEN->OPEN:seeding failed (RuntimeException)"));
-    }
-
-    @Test
-    void probeFailureReopensAndTheProbeCallerStillGetsALocalDecision() {
-        FallbackRateLimitStore store = newStore(2, 100);
-        Limit limit = noRefill(10);
-        trip(store);
-        nanos.addAndGet(SECOND);
-        ChainResult probe = join(store, chain("p:tenant:acme", limit));
-        assertTrue(probe.acquired(), "a failed probe is served locally, no exception escapes");
-        assertEquals(DegradationState.OPEN, store.state());
-        assertTrue(listener.transitions.contains("HALF_OPEN->OPEN:probe failed (RuntimeException)"));
-        assertTrue(seeder.domains.isEmpty(), "no seeding happens without a successful probe");
-    }
-
-    @Test
-    void singleLevelCallsDegradeAndRecover() {
-        FallbackRateLimitStore store = newStore(1, 100);
-        Limit limit = noRefill(5);
-        primary.failing = true;
-        for (int i = 0; i < 3; i++) {
-            store.tryAcquire(key("p:user:alice"), limit, Algorithm.TOKEN_BUCKET, 1);
-        }
-        assertEquals(DegradationState.OPEN, store.state());
-        int callsAtOpen = primary.singleCalls.get();
-        StoreResult localDecision = store.tryAcquire(key("p:user:alice"), limit, Algorithm.TOKEN_BUCKET, 1);
-        assertTrue(localDecision.acquired());
-        assertEquals(callsAtOpen, primary.singleCalls.get());
-
-        primary.failing = false;
-        nanos.addAndGet(SECOND);
-        StoreResult probe = store.tryAcquire(key("p:user:alice"), limit, Algorithm.TOKEN_BUCKET, 1);
-        assertTrue(probe.acquired());
-        assertEquals(4, probe.remaining(), "the probe hit the distributed bucket");
-        assertEquals(DegradationState.CLOSED, store.state());
-        assertEquals(1, seeder.totalSeeded());
-    }
-
-    @Test
-    void asyncSingleLevelFailuresDegradeWithoutEscaping() {
-        FallbackRateLimitStore store = newStore(1, 100);
-        Limit limit = noRefill(5);
-        primary.failing = true;
-        for (int i = 0; i < 4; i++) {
-            StoreResult result = store
-                    .tryAcquireAsync(key("p:user:bob"), limit, Algorithm.TOKEN_BUCKET, 1)
-                    .toCompletableFuture().join();
-            assertTrue(result.acquired());
-        }
-        assertEquals(DegradationState.OPEN, store.state());
-        assertEquals(4, listener.decisions.size());
-    }
-
-    @Test
-    void callerErrorsFromAsyncPrimariesPropagate() {
-        FallbackRateLimitStore brokenInput = new FallbackRateLimitStore(
-                new FakePrimary(delegate) {
-                    @Override
-                    public CompletionStage<ChainResult> tryAcquireAll(List<LevelRequest> chain) {
-                        return CompletableFuture.failedFuture(new IllegalArgumentException("bad chain"));
-                    }
-                },
-                local, seeder,
-                new FallbackConfig(3, Duration.ofSeconds(1), Duration.ofSeconds(4), 1, 100),
-                List.of(listener), nanos::get, FallbackRateLimitStoreTest::scopeAsKeyGroup);
-        CompletionStage<ChainResult> result = brokenInput.tryAcquireAll(chain("p:tenant:acme", noRefill(5)));
-        assertThrows(CompletionException.class, () -> result.toCompletableFuture().join());
-        assertEquals(DegradationState.CLOSED, brokenInput.state());
-    }
-
-    @Test
-    void seedingIsCappedAndOverflowIsSkipped() {
-        FallbackRateLimitStore store = newStore(1, 1);
-        Limit limit = noRefill(10);
-        trip(store);
-        join(store, chain("p:tenant:first", limit));
-        join(store, chain("p:tenant:second", limit));
-        primary.failing = false;
-        nanos.addAndGet(SECOND);
-        join(store, chain("p:tenant:first", limit));
-        assertEquals(DegradationState.CLOSED, store.state());
-        assertEquals(1, seeder.totalSeeded(), "the hard cap bounds the replayed entries");
-        assertEquals(key("p:tenant:first").domain(), seeder.domains.get(0));
-    }
-
-    @Test
-    void listenersSeeKeyGroupOnlyThroughTheFullCycle() {
-        FallbackRateLimitStore store = newStore(1, 100);
-        Limit limit = noRefill(2);
-        trip(store);
-        join(store, chain("p:tenant:raw-secret-1", limit));
-        join(store, chain("p:tenant:raw-secret-1", limit));
-        join(store, chain("p:tenant:raw-secret-1", limit)); // rejected: capacity 2
-        primary.failing = false;
-        nanos.addAndGet(SECOND);
-        join(store, chain("p:tenant:raw-secret-1", limit));
-        assertEquals(DegradationState.CLOSED, store.state());
-
-        assertEquals(List.of("p/tenant/ALLOWED", "p/tenant/ALLOWED", "p/tenant/REJECTED"),
-                listener.decisions.subList(3, 6));
-        for (String event : listener.decisions) {
-            assertFalse(event.contains("raw-secret-1"), "raw keys never reach listeners");
-        }
-        for (String transition : listener.transitions) {
-            assertFalse(transition.contains("raw-secret-1"), "raw keys never appear in reasons");
-            assertFalse(transition.endsWith(":"), "every transition carries a non-empty reason");
-        }
-        assertEquals(3, listener.transitions.size(), "degrade, probe, recover");
-    }
-
-    @Test
-    void siblingChainsSeedTheirSharedCanonicalParentOnlyOnce() {
-        FallbackRateLimitStore store = newStore(1, 100);
-        trip(store);
-        Limit parentLimit = noRefill(10);
-        var parent = new LevelRequest(key("g:global:shared"), parentLimit, Algorithm.TOKEN_BUCKET, 1);
-        for (String user : List.of("alice", "bob")) {
-            assertTrue(join(store, List.of(parent,
-                    new LevelRequest(key("u:user:" + user), parentLimit, Algorithm.TOKEN_BUCKET, 1))).acquired());
-        }
-        primary.failing = false;
-        nanos.addAndGet(SECOND);
-        join(store, List.of(parent));
-        var shared = seeder.buckets.stream().flatMap(List::stream)
-                .filter(bucket -> bucket.storageKey().equals(parent.storageKey())).toList();
-        assertEquals(1, shared.size());
-        assertEquals(8, shared.get(0).remaining());
-        assertEquals(parent.storageKey().domain(), seeder.domains.get(0));
-    }
-
-    @Test
-    void wrappedIdentityFailureNeverFallsBackFromSynchronousAcquisition() {
-        FakePrimary invalid = new FakePrimary(delegate) {
-            @Override
-            public StoreResult tryAcquire(BucketIdentity identity, Limit limit, Algorithm algorithm, long weight) {
-                throw new CompletionException(new CompletionException(
-                        new io.quotaflow.core.PolicyConfigurationException("identity conflict")));
-            }
+    @Test void failedStartupNeverAllocatesUnprovenCreditAndCountsRejections() {
+        var policies = policies(Algorithm.TOKEN_BUCKET, 100, 100);
+        var primary = new RecoveryPrimaryFixture(policies); primary.available = false;
+        var decisions = new AtomicInteger();
+        var listener = new DegradationListener() {
+            public void onTransition(DegradationState from, DegradationState to, String reason) { }
+            public void onFallbackDecision(String policy, String group, Verdict verdict) { decisions.incrementAndGet(); }
         };
-        FallbackRateLimitStore store = new FallbackRateLimitStore(invalid, local, seeder,
-                FallbackConfig.defaults(), List.of(listener), nanos::get, FallbackRateLimitStoreTest::scopeAsKeyGroup);
-        for (int i = 0; i < 5; i++) {
-            assertThrows(CompletionException.class,
-                    () -> store.tryAcquire(key("p:tenant:acme"), noRefill(10), Algorithm.TOKEN_BUCKET, 1));
+        try (var store = new FallbackRateLimitStore(primary, settings(1, 10), List.of(listener))) {
+            var flow = DefaultQuotaFlow.builder(policies, store).build();
+            for (int i = 0; i < 10; i++) assertFalse(flow.tryAcquire("quota", RateLimitContext.empty()).isAllowed());
+            assertEquals(10, decisions.get()); assertEquals(0, store.trackedBuckets());
         }
-        assertEquals(DegradationState.CLOSED, store.state());
-        assertTrue(local.snapshot().isEmpty());
-        assertTrue(listener.decisions.isEmpty());
-        assertTrue(listener.transitions.isEmpty());
     }
-
-    @Test
-    void unavailableAuthoritativeRegistryCannotCreateNewLocalIdentity() {
-        FakePrimary unavailable = new FakePrimary(delegate) {
-            @Override
-            public CompletionStage<Void> registerPolicies(List<io.quotaflow.core.store.PolicyBinding> bindings) {
-                return CompletableFuture.failedFuture(new RuntimeException("registry unavailable"));
+    @Test void lateOldPrimaryResponseCannotRetireTheCurrentOutage() throws Exception {
+        var policies = policies(Algorithm.TOKEN_BUCKET, 100, 100);
+        var primary = new RecoveryPrimaryFixture(policies);
+        var delayed = new CompletableFuture<ChainResult>();
+        try (var store = new FallbackRateLimitStore(primary, settings(1, 10), List.of())) {
+            var flow = DefaultQuotaFlow.builder(policies, store).build();
+            await(() -> store.state() == DegradationState.CLOSED);
+            primary.delayedAcquisition = delayed;
+            var key = new BucketIdentity(new QuotaDomain("default", "quota"), "quota", Scope.GLOBAL, "all");
+            var request = List.of(new LevelRequest(key, policies.policy("quota").limit().orElseThrow(), Algorithm.TOKEN_BUCKET, 1));
+            var old = store.tryAcquireAll(request).toCompletableFuture();
+            await(() -> primary.acquisitions.get() == 1);
+            primary.available = false;
+            assertFalse(store.tryAcquireAll(request).toCompletableFuture().join().acquired());
+            delayed.complete(ChainResult.acquired(0, 99));
+            assertFalse(old.join().acquired());
+            assertEquals(DegradationState.OPEN, store.state());
+        }
+    }
+    @Test void trackingPressureAcrossSiblingsCannotDebitTheirSharedParent() throws Exception {
+        var policies = PolicySet.compile(List.of(
+                RateLimitPolicy.builder("provider").scope(Scope.GLOBAL).limit(new Limit(10, 10, Duration.ofSeconds(1))).build(),
+                RateLimitPolicy.builder("leaf").scope(Scope.USER).parentId("provider").limit(new Limit(10, 10, Duration.ofSeconds(1))).build()));
+        var primary = new RecoveryPrimaryFixture(policies); var time = new AtomicLong();
+        try (var store = new FallbackRateLimitStore(primary, settings(1, 2), List.of(), time::get)) {
+            var flow = DefaultQuotaFlow.builder(policies, store).build();
+            await(() -> store.state() == DegradationState.CLOSED);
+            var alice = RateLimitContext.builder().put(RateLimitContext.PRINCIPAL, "alice").build();
+            var bob = RateLimitContext.builder().put(RateLimitContext.PRINCIPAL, "bob").build();
+            primary.available = false;
+            assertFalse(flow.tryAcquire("leaf", alice).isAllowed());
+            assertFalse(flow.tryAcquire("leaf", alice).isAllowed());
+            assertEquals(2, store.trackedBuckets());
+            time.set(Duration.ofMillis(100).toNanos());
+            assertFalse(flow.tryAcquire("leaf", bob).isAllowed(), "new child exceeds the tracking bound");
+            assertTrue(flow.tryAcquire("leaf", alice).isAllowed(), "rejected sibling must not debit the common parent");
+            assertFalse(flow.tryAcquire("provider", RateLimitContext.empty()).isAllowed(), "direct parent uses the same local route and balance");
+            assertEquals(2, store.trackedBuckets());
+        }
+    }
+    @Test void idleProbeFailureEntersDegradationWithoutConsumingQuota() throws Exception {
+        var policies = policies(Algorithm.TOKEN_BUCKET, 10, 10); var primary = new RecoveryPrimaryFixture(policies);
+        try (var store = new FallbackRateLimitStore(primary, settings(1, 10), List.of())) {
+            DefaultQuotaFlow.builder(policies, store).build();
+            await(() -> store.state() == DegradationState.CLOSED);
+            primary.available = false;
+            await(() -> store.state() == DegradationState.OPEN);
+            assertEquals(0, primary.acquisitions.get());
+            assertEquals(0, store.trackedBuckets());
+        }
+    }
+    @Test void stalledLocalAdmissionCannotExtendTheRecoveryAttemptOrCrossItsFence() throws Exception {
+        var policies = policies(Algorithm.TOKEN_BUCKET, 10, 10); var primary = new RecoveryPrimaryFixture(policies);
+        var entered = new CountDownLatch(1); var release = new CountDownLatch(1); var calls = new AtomicInteger();
+        java.util.function.LongSupplier clock = () -> {
+            if (Thread.currentThread().getName().equals("stalled-guard") && calls.incrementAndGet() == 2) {
+                entered.countDown();
+                try { assertTrue(release.await(3, TimeUnit.SECONDS)); }
+                catch (InterruptedException failure) { throw new AssertionError(failure); }
             }
+            return System.nanoTime();
         };
-        FallbackRateLimitStore store = new FallbackRateLimitStore(unavailable, local, seeder,
-                FallbackConfig.defaults(), List.of(listener), nanos::get, FallbackRateLimitStoreTest::scopeAsKeyGroup);
-        var error = assertThrows(CompletionException.class,
-                () -> store.tryAcquire(key("p:tenant:new"), noRefill(10), Algorithm.TOKEN_BUCKET, 1));
-        assertTrue(error.getCause() instanceof io.quotaflow.core.PolicyConfigurationException);
-        assertTrue(local.snapshot().isEmpty());
-        assertTrue(listener.decisions.isEmpty());
-        assertEquals(0, unavailable.singleCalls.get());
+        var settings = new RecoverySettings("default", "test", "single", RecoveryCohort.single(), 10, 10,
+                Duration.ofMillis(10), Duration.ofMillis(100));
+        var worker = Executors.newSingleThreadExecutor(action -> new Thread(action, "stalled-guard"));
+        try (var store = new FallbackRateLimitStore(primary, settings, List.of(), clock)) {
+            var flow = DefaultQuotaFlow.builder(policies, store).build();
+            await(() -> store.state() == DegradationState.CLOSED); primary.available = false;
+            flow.tryAcquire("quota", RateLimitContext.empty()); flow.tryAcquire("quota", RateLimitContext.empty());
+            var attempt = worker.submit(() -> flow.tryAcquire("quota", RateLimitContext.empty()));
+            assertTrue(entered.await(2, TimeUnit.SECONDS)); primary.available = true;
+            Thread.sleep(200);
+            assertEquals(0, primary.seeds.get(), "a stalled entrant cannot be omitted from final accounting");
+            assertNotEquals(DegradationState.CLOSED, store.state());
+            release.countDown(); assertFalse(attempt.get(2, TimeUnit.SECONDS).isAllowed());
+            await(() -> store.state() == DegradationState.CLOSED);
+        } finally { release.countDown(); worker.shutdownNow(); }
     }
-
-    @Test
-    void stateSeederNoOpCompletes() {
-        assertTrue(StateSeeder.noOp().seed(key("p:tenant:x").domain(), List.of()).toCompletableFuture().isDone());
+    @Test void inFlightSaturationRejectsBeforeDispatchAndShutdownRetiresLeases() throws Exception {
+        var policies = policies(Algorithm.TOKEN_BUCKET, 10, 10); var primary = new RecoveryPrimaryFixture(policies);
+        var settings = new RecoverySettings("default", "test", "single", RecoveryCohort.single(), 10, 1,
+                Duration.ofMillis(20), Duration.ofSeconds(1));
+        var delayed = new CompletableFuture<ChainResult>();
+        try (var store = new FallbackRateLimitStore(primary, settings, List.of())) {
+            DefaultQuotaFlow.builder(policies, store).build(); await(() -> store.state() == DegradationState.CLOSED);
+            primary.delayedAcquisition = delayed;
+            var key = new BucketIdentity(new QuotaDomain("default", "quota"), "quota", Scope.GLOBAL, "all");
+            var request = List.of(new LevelRequest(key, policies.policy("quota").limit().orElseThrow(), Algorithm.TOKEN_BUCKET, 1));
+            var first = store.tryAcquireAll(request).toCompletableFuture(); await(() -> primary.acquisitions.get() == 1);
+            assertFalse(store.tryAcquireAll(request).toCompletableFuture().join().acquired());
+            assertEquals(1, primary.acquisitions.get());
+            store.close(); assertEquals(0, store.trackedBuckets()); assertFalse(first.join().acquired());
+            delayed.complete(ChainResult.acquired(0, 9));
+            assertEquals(0, store.trackedBuckets()); assertFalse(first.join().acquired());
+            assertFalse(store.tryAcquireAll(request).toCompletableFuture().join().acquired());
+            assertThrows(CompletionException.class, () -> store.configureRecovery(policies, "default", null).toCompletableFuture().join());
+        }
     }
-
-    @Test
-    void configValidation() {
-        assertThrows(IllegalArgumentException.class,
-                () -> new FallbackConfig(0, Duration.ofSeconds(1), Duration.ofSeconds(4), 1, 100));
-        assertThrows(IllegalArgumentException.class,
-                () -> new FallbackConfig(1, Duration.ZERO, Duration.ofSeconds(4), 1, 100));
-        assertThrows(IllegalArgumentException.class,
-                () -> new FallbackConfig(1, Duration.ofSeconds(4), Duration.ofSeconds(1), 1, 100));
-        assertThrows(IllegalArgumentException.class,
-                () -> new FallbackConfig(1, Duration.ofSeconds(1), Duration.ofSeconds(4), 0, 100));
-        assertThrows(IllegalArgumentException.class,
-                () -> new FallbackConfig(1, Duration.ofSeconds(1), Duration.ofSeconds(4), 1, 0));
-        assertThrows(NullPointerException.class,
-                () -> new FallbackConfig(1, null, Duration.ofSeconds(4), 1, 100));
-        assertThrows(NullPointerException.class,
-                () -> new FallbackConfig(1, Duration.ofSeconds(1), null, 1, 100));
-        assertEquals(3, FallbackConfig.defaults().failureThreshold());
+    @Test void lostReadyReplyKeepsAdmissionQuiescedUntilAnAuthoritativeRead() throws Exception {
+        var policies = policies(Algorithm.TOKEN_BUCKET, 10, 10); var primary = new RecoveryPrimaryFixture(policies);
+        var settings = new RecoverySettings("default", "test", "single", RecoveryCohort.single(), 10, 10,
+                Duration.ofMillis(10), Duration.ofMillis(200));
+        var lost = new CompletableFuture<RecoveryControlResult>();
+        try (var store = new FallbackRateLimitStore(primary, settings, List.of())) {
+            var flow = DefaultQuotaFlow.builder(policies, store).build(); await(() -> store.state() == DegradationState.CLOSED);
+            primary.available = false;
+            flow.tryAcquire("quota", RateLimitContext.empty()); flow.tryAcquire("quota", RateLimitContext.empty());
+            var key = new BucketIdentity(new QuotaDomain("default", "quota"), "quota", Scope.GLOBAL, "global");
+            var held = new AtomicReference<StoreResult>();
+            primary.onReady = () -> held.set(store.tryAcquire(key, policies.policy("quota").limit().orElseThrow(), Algorithm.TOKEN_BUCKET, 1));
+            primary.delayedReady = lost; primary.available = true;
+            await(() -> held.get() != null);
+            assertNotNull(held.get().recoveryPending());
+            await(() -> store.state() == DegradationState.CLOSED);
+            assertEquals(0, store.trackedBuckets());
+            primary.available = false;
+            flow.tryAcquire("quota", RateLimitContext.empty()); flow.tryAcquire("quota", RateLimitContext.empty());
+            int tracked = store.trackedBuckets();
+            lost.complete(primary.lastReady);
+            assertEquals(DegradationState.OPEN, store.state()); assertEquals(tracked, store.trackedBuckets());
+        }
     }
-
-    @Test
-    void constructorValidation() {
-        FallbackConfig config = FallbackConfig.defaults();
-        assertThrows(NullPointerException.class,
-                () -> new FallbackRateLimitStore(null, seeder, config, List.of()));
-        assertThrows(NullPointerException.class,
-                () -> new FallbackRateLimitStore(primary, null, config, List.of()));
-        assertThrows(NullPointerException.class,
-                () -> new FallbackRateLimitStore(primary, seeder, null, List.of()));
-        assertThrows(NullPointerException.class,
-                () -> new FallbackRateLimitStore(primary, seeder, config, null));
-        FallbackRateLimitStore store = new FallbackRateLimitStore(primary, seeder, config, List.of());
-        assertEquals(DegradationState.CLOSED, store.state());
+    @Test void zeroShareChildRejectsWeightedChainsWithoutSpendingItsUsableParent() throws Exception {
+        var root = RateLimitPolicy.builder("root").scope(Scope.GLOBAL).limit(new Limit(100, 100, Duration.ofSeconds(1))).build();
+        var child = RateLimitPolicy.builder("child").scope(Scope.USER).parentId("root").limit(new Limit(3, 1, Duration.ofSeconds(1))).build();
+        var policies = PolicySet.compile(List.of(root, child)); var primary = new RecoveryPrimaryFixture(policies); var time = new AtomicLong();
+        try (var store = new FallbackRateLimitStore(primary, settings(4, 10), List.of(), time::get)) {
+            var flow = DefaultQuotaFlow.builder(policies, store).build();
+            var user = RateLimitContext.builder().put(RateLimitContext.PRINCIPAL, "user").build();
+            await(() -> store.state() == DegradationState.CLOSED);
+            assertTrue(flow.tryAcquire("child", user).isAllowed());
+            primary.available = false; flow.tryAcquire("child", user);
+            assertFalse(flow.tryAcquire("root", RateLimitContext.empty()).isAllowed());
+            time.set(80_000_000L);
+            var blocked = flow.tryAcquire("child", user, 2);
+            assertFalse(blocked.isAllowed()); assertEquals(0, blocked.remaining()); assertTrue(blocked.retryAfter().isEmpty());
+            assertTrue(flow.tryAcquire("root", RateLimitContext.empty(), 2).isAllowed());
+        }
+    }
+    @Test void invalidAdapterOutcomesFailBoundedlyInsteadOfHangingOrGrantingFallback() throws Exception {
+        for (ChainResult invalid : Arrays.asList(null, ChainResult.acquired(5, 0), ChainResult.rejected(0, -1, 10))) {
+            var policies = policies(Algorithm.TOKEN_BUCKET, 10, 10); var primary = new RecoveryPrimaryFixture(policies);
+            try (var store = new FallbackRateLimitStore(primary, settings(1, 10), List.of())) {
+                DefaultQuotaFlow.builder(policies, store).build(); await(() -> store.state() == DegradationState.CLOSED);
+                primary.delayedAcquisition = CompletableFuture.completedFuture(invalid);
+                var key = new BucketIdentity(new QuotaDomain("default", "quota"), "quota", Scope.GLOBAL, "all");
+                var error = assertThrows(ExecutionException.class, () -> store.tryAcquireAsync(key,
+                        policies.policy("quota").limit().orElseThrow(), Algorithm.TOKEN_BUCKET, 1).toCompletableFuture().get(1, TimeUnit.SECONDS));
+                assertInstanceOf(StateCompatibilityException.class, error.getCause());
+                assertEquals(DegradationState.OPEN, store.state()); assertEquals(0, store.trackedBuckets());
+            }
+        }
+    }
+    @Test void obsoletePrimaryFailureCannotEmitAnotherFallbackDecisionAfterFencing() throws Exception {
+        var policies = policies(Algorithm.TOKEN_BUCKET, 10, 10); var primary = new RecoveryPrimaryFixture(policies);
+        var notifications = new AtomicInteger();
+        var listener = new DegradationListener() {
+            public void onTransition(DegradationState from, DegradationState to, String reason) { }
+            public void onFallbackDecision(String policy, String group, Verdict verdict) { notifications.incrementAndGet(); }
+        };
+        var delayed = new CompletableFuture<ChainResult>();
+        try (var store = new FallbackRateLimitStore(primary, settings(1, 10), List.of(listener))) {
+            DefaultQuotaFlow.builder(policies, store).build(); await(() -> store.state() == DegradationState.CLOSED);
+            var key = new BucketIdentity(new QuotaDomain("default", "quota"), "quota", Scope.GLOBAL, "all");
+            var request = List.of(new LevelRequest(key, policies.policy("quota").limit().orElseThrow(), Algorithm.TOKEN_BUCKET, 1));
+            primary.delayedAcquisition = delayed;
+            var old = store.tryAcquireAll(request).toCompletableFuture(); await(() -> primary.acquisitions.get() == 1);
+            primary.available = false; assertFalse(store.tryAcquireAll(request).toCompletableFuture().join().acquired());
+            primary.delayedAcquisition = null; primary.available = true;
+            await(() -> store.state() == DegradationState.CLOSED); assertFalse(old.join().acquired());
+            primary.available = false; store.tryAcquireAll(request).toCompletableFuture().join();
+            int before = notifications.get();
+            delayed.completeExceptionally(new IllegalStateException("lost old response"));
+            assertEquals(before, notifications.get()); assertEquals(DegradationState.OPEN, store.state());
+        }
+    }
+    @Test void guardedPrimaryReportsTheConservativeBalanceAndRetryOfBothLimiters() throws Exception {
+        var policies = policies(Algorithm.TOKEN_BUCKET, 10, 10); var primary = new RecoveryPrimaryFixture(policies); var time = new AtomicLong();
+        try (var store = new FallbackRateLimitStore(primary, settings(2, 10), List.of(), time::get)) {
+            var flow = DefaultQuotaFlow.builder(policies, store).build(); await(() -> store.state() == DegradationState.CLOSED);
+            primary.available = false;
+            flow.tryAcquire("quota", RateLimitContext.empty()); flow.tryAcquire("quota", RateLimitContext.empty());
+            time.set(500_000_000L); flow.tryAcquire("quota", RateLimitContext.empty(), 5);
+            time.set(1_000_000_000L); assertTrue(flow.tryAcquire("quota", RateLimitContext.empty()).isAllowed());
+            primary.awaitOtherMembers = true; primary.reportedRemaining = 10; primary.available = true;
+            await(() -> primary.joins.get() > 0);
+            Decision allowed; long deadline = System.nanoTime() + Duration.ofSeconds(2).toNanos();
+            do { allowed = flow.tryAcquire("quota", RateLimitContext.empty()); if (allowed.isAllowed()) break; Thread.sleep(5); }
+            while (System.nanoTime() < deadline);
+            assertTrue(allowed.isAllowed()); assertEquals(3, allowed.remaining()); assertEquals(1, primary.acquisitions.get());
+            primary.allow = false;
+            var rejected = flow.tryAcquire("quota", RateLimitContext.empty(), 3);
+            assertFalse(rejected.isAllowed()); assertEquals(0, rejected.remaining());
+            assertEquals(Duration.ofMillis(600), rejected.retryAfter().orElseThrow());
+        }
+    }
+    @Test void shutdownDoesNotEnrollAfterALateHealthProbeCompletion() throws Exception {
+        var policies = policies(Algorithm.TOKEN_BUCKET, 10, 10); var primary = new RecoveryPrimaryFixture(policies);
+        var probe = new CompletableFuture<Void>(); primary.delayedProbe = probe;
+        var store = new FallbackRateLimitStore(primary, settings(1, 10), List.of());
+        DefaultQuotaFlow.builder(policies, store).build(); await(() -> primary.probes.get() == 1);
+        store.close(); probe.complete(null);
+        Thread.sleep(30);
+        assertEquals(0, primary.enrollments.get()); assertEquals(0, store.trackedBuckets());
     }
 }

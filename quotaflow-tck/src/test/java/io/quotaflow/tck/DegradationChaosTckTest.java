@@ -131,15 +131,42 @@ class DegradationChaosTckTest {
         private volatile boolean throttled;
 
         LoadHarness(String storageKey, Limit limit) {
-            this.chain = List.of(new LevelRequest(key(storageKey), limit, Algorithm.TOKEN_BUCKET, 1));
+            String namespace = "chaos-" + UUID.randomUUID();
+            var domain = new io.quotaflow.core.store.QuotaDomain(namespace, "quota");
+            var identity = new BucketIdentity(domain, "quota", io.quotaflow.core.Scope.GLOBAL, storageKey);
+            this.chain = List.of(new LevelRequest(identity, limit, Algorithm.TOKEN_BUCKET, 1));
+            var policies = io.quotaflow.core.PolicySet.compile(List.of(io.quotaflow.core.RateLimitPolicy.builder("quota")
+                    .scope(io.quotaflow.core.Scope.GLOBAL).limit(limit).build()));
+            var cohort = new io.quotaflow.core.store.RecoveryCohort(List.of("a", "b"));
+            var bindings = List.of(io.quotaflow.core.store.PolicyBinding.of(identity, Algorithm.TOKEN_BUCKET));
             String uri = "redis://" + REDIS.getHost() + ":" + REDIS.getMappedPort(6379);
             for (int i = 0; i < INSTANCES; i++) {
-                RedisClient client = RedisClient.create(uri);
+                RedisClient client = io.quotaflow.store.redis.RedisClientFactory.createClient(uri, Duration.ofSeconds(2), STORE_CONFIG.commandTimeout());
                 CLIENTS.add(client);
                 RedisRateLimitStore primary = RedisRateLimitStore.create(client, STORE_CONFIG);
                 primaries.add(primary);
-                stores.add(new FallbackRateLimitStore(
-                        primary, primary, FALLBACK_CONFIG, List.of(new CountingListener(degradedAllowed))));
+                if (i == 0) try (var connection = client.connect()) {
+                    new io.quotaflow.store.redis.RedisNamespaceAdmin(connection).provisionFresh(namespace, true);
+                    primary.registerPolicies(bindings).toCompletableFuture().join();
+                    var admin = new io.quotaflow.store.redis.RedisRecoveryController(connection, Duration.ofSeconds(2));
+                    admin.provisionCohort(namespace, cohort, "initial", true, true).toCompletableFuture().join();
+                    admin.provisionDomain(domain, cohort, "initial", policies.recoveryFingerprint("quota"), true, true).toCompletableFuture().join();
+                }
+                var delegate = primary.recoveryPrimary(namespace, Duration.ofMillis(200), true);
+                var adapter = (io.quotaflow.core.store.RecoveryPrimary) java.lang.reflect.Proxy.newProxyInstance(
+                        io.quotaflow.core.store.RecoveryPrimary.class.getClassLoader(), new Class<?>[]{io.quotaflow.core.store.RecoveryPrimary.class},
+                        (proxy, method, args) -> {
+                            if (throttled) return java.util.concurrent.CompletableFuture.failedFuture(new io.quotaflow.core.store.PrimaryDispatchException(
+                                    io.quotaflow.core.store.PrimaryDispatchException.Outcome.NOT_DISPATCHED));
+                            try { return method.invoke(delegate, args); }
+                            catch (java.lang.reflect.InvocationTargetException failure) { throw failure.getCause(); }
+                        });
+                var settings = new io.quotaflow.fallback.RecoverySettings(namespace, "chaos", cohort.members().get(i), cohort,
+                        10_000, 4096, Duration.ofMillis(100), Duration.ofSeconds(2));
+                var store = new FallbackRateLimitStore(adapter, settings, List.of(new CountingListener(degradedAllowed)));
+                store.registerPolicies(bindings).toCompletableFuture().join();
+                store.configureRecovery(policies, namespace, null).toCompletableFuture().join();
+                stores.add(store);
             }
         }
 
@@ -177,8 +204,7 @@ class DegradationChaosTckTest {
         }
 
         /**
-         * Suspends store calls (probes ride real requests, so this also
-         * suspends probing); {@link #resume()} restarts the flow.
+         * Suspends traffic and control dispatch while the fixture edits quota state; {@link #resume()} restarts the flow.
          */
         void throttle() {
             throttled = true;
@@ -213,6 +239,7 @@ class DegradationChaosTckTest {
             pool.shutdown();
             pool.awaitTermination(10, TimeUnit.SECONDS);
             pool.shutdownNow();
+            stores.forEach(FallbackRateLimitStore::close);
             primaries.forEach(RedisRateLimitStore::close);
         }
     }
@@ -224,6 +251,7 @@ class DegradationChaosTckTest {
         Limit limit = new Limit(100, 1, Duration.ofHours(1));
         String key = "chaos:global:" + UUID.randomUUID();
         try (LoadHarness load = new LoadHarness(key, limit)) {
+            assertTrue(load.awaitState(DegradationState.CLOSED, Duration.ofSeconds(10)));
             load.start();
             long healthyDeadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
             while (load.allowedTotal.get() == 0 && System.nanoTime() < healthyDeadline) {
@@ -246,7 +274,7 @@ class DegradationChaosTckTest {
                 assertTrue(load.escaped.isEmpty(),
                         "zero exceptions escape to callers during the outage: " + load.escaped);
                 long degradedFlow = load.degradedAllowed.get();
-                assertTrue(degradedFlow > 0, "service continued while degraded");
+                org.junit.jupiter.api.Assertions.assertEquals(0, degradedFlow, "cold shares cannot create another burst before the first refill");
                 assertTrue(degradedFlow <= 100,
                         "summed degraded flow " + degradedFlow + " must not exceed the global limit 100"
                                 + " (two instances at half the limit each)");

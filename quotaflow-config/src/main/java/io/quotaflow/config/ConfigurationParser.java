@@ -45,6 +45,9 @@ import java.util.Optional;
 public final class ConfigurationParser {
 
     public static final String NAMESPACE = "quotaflow.";
+    public static final String RECOVERY_PREFIX = "quotaflow.recovery.";
+    public static final String ENDPOINT_KEY = "quotaflow.redis.url";
+    public static final String NAMESPACE_KEY = "quotaflow.namespace";
     public static final String DEFAULTS_PREFIX = "quotaflow.defaults.";
     public static final String POLICIES_PREFIX = "quotaflow.policies.";
 
@@ -66,6 +69,9 @@ public final class ConfigurationParser {
     public static QuotaFlowConfiguration parse(Map<String, String> properties) {
         Map<String, Map<String, String>> policies = new LinkedHashMap<>();
         Map<String, String> defaults = new LinkedHashMap<>();
+        Map<String, String> recovery = new LinkedHashMap<>();
+        String namespace = "default";
+        String endpoint = StartupAccounting.DEFAULT_ENDPOINT;
         for (Map.Entry<String, String> entry : properties.entrySet()) {
             String key = entry.getKey();
             if (!key.startsWith(NAMESPACE)) {
@@ -79,6 +85,14 @@ public final class ConfigurationParser {
                 }
                 policies.computeIfAbsent(rest.substring(0, dot), id -> new LinkedHashMap<>())
                         .put(rest.substring(dot + 1), entry.getValue());
+            } else if (key.equals(ENDPOINT_KEY)) {
+                endpoint = entry.getValue();
+            } else if (key.equals(NAMESPACE_KEY)) {
+                namespace = entry.getValue();
+            } else if (key.startsWith(RECOVERY_PREFIX)) {
+                String field = key.substring(RECOVERY_PREFIX.length());
+                if (!java.util.Set.of("deployment-id", "instance-id", "members", "mode").contains(field)) throw unknownKey(key);
+                recovery.put(field, entry.getValue());
             } else if (key.startsWith(DEFAULTS_PREFIX)) {
                 defaults.put(key.substring(DEFAULTS_PREFIX.length()), entry.getValue());
             } else {
@@ -91,7 +105,13 @@ public final class ConfigurationParser {
         for (Map.Entry<String, Map<String, String>> policy : policies.entrySet()) {
             compiled.add(parsePolicy(policy.getKey(), policy.getValue(), d));
         }
-        return new QuotaFlowConfiguration(PolicySet.compile(compiled), d.expectedInstances());
+        int expected = d.expectedInstances().orElse(1);
+        io.quotaflow.core.store.RecoveryCohort cohort = recovery.containsKey("members")
+                ? new io.quotaflow.core.store.RecoveryCohort(java.util.Arrays.stream(recovery.get("members").split(",", -1))
+                    .map(String::trim).toList()) : io.quotaflow.core.store.RecoveryCohort.single();
+        StartupAccounting accounting = new StartupAccounting(namespace, recovery.getOrDefault("deployment-id", "default"),
+                recovery.getOrDefault("instance-id", io.quotaflow.core.store.RecoveryCohort.DEFAULT_INSTANCE_ID), cohort, expected, StartupAccounting.fingerprintEndpoint(endpoint), recovery.getOrDefault("mode", "coordinated"));
+        return new QuotaFlowConfiguration(PolicySet.compile(compiled), d.expectedInstances(), accounting);
     }
 
     private static Defaults parseDefaults(Map<String, String> defaults) {

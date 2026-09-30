@@ -31,6 +31,8 @@ class QuotaFlowPropertiesTest {
         source.put("quotaflow.defaults.algorithm", "token-bucket");
         source.put("quotaflow.defaults.reaction", "reject");
         source.put("quotaflow.defaults.expected-instances", "4");
+        source.put("quotaflow.recovery.members", "a,b,c,d");
+        source.put("quotaflow.recovery.instance-id", "a");
         source.put("quotaflow.policies.user-api.scope", "user");
         source.put("quotaflow.policies.user-api.limit.capacity", "100");
         source.put("quotaflow.policies.user-api.limit.refill-amount", "50");
@@ -53,7 +55,7 @@ class QuotaFlowPropertiesTest {
                 .containsEntry("quotaflow.policies.user-api.limit.refill-amount", "50")
                 .containsEntry("quotaflow.policies.user-api.limit.refill-period", "PT1M")
                 .containsEntry("quotaflow.policies.user-api.priority", "3")
-                .doesNotContainKey("quotaflow.redis.url")
+                .containsEntry("quotaflow.redis.url", "redis://localhost:6379")
                 .doesNotContainKey("quotaflow.enabled");
 
         QuotaFlowConfiguration configuration = ConfigurationParser.parse(map);

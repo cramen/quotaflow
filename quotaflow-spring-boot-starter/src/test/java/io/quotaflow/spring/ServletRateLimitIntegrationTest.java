@@ -104,6 +104,12 @@ class ServletRateLimitIntegrationTest {
     @org.springframework.context.annotation.Configuration(proxyBeanMethods = false)
     @org.springframework.boot.autoconfigure.EnableAutoConfiguration
     static class TestApplication {
+        // These tests exercise HTTP mapping with an explicitly selected local store.
+        @org.springframework.context.annotation.Bean
+        io.quotaflow.core.store.RateLimitStore localStore() {
+            return new io.quotaflow.core.store.LocalRateLimitStore();
+        }
+
 
         @RestController
         static class LimitedController {

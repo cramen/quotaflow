@@ -40,6 +40,7 @@ public final class ConfigReloader implements AutoCloseable {
     private final DefaultQuotaFlow quotaFlow;
     private final Duration pollInterval;
     private final List<Runnable> onApplied;
+    private final StartupAccounting startupAccounting;
     private final java.util.concurrent.locks.ReentrantLock pipelineLock = new java.util.concurrent.locks.ReentrantLock();
 
     private volatile Map<String, String> lastSeen;
@@ -50,6 +51,7 @@ public final class ConfigReloader implements AutoCloseable {
         this.quotaFlow = builder.quotaFlow;
         this.pollInterval = builder.pollInterval;
         this.onApplied = List.copyOf(builder.onApplied);
+        this.startupAccounting = builder.startupAccounting;
     }
 
     public static Builder builder(ConfigSource source, DefaultQuotaFlow quotaFlow) {
@@ -123,6 +125,10 @@ public final class ConfigReloader implements AutoCloseable {
             QuotaFlowConfiguration configuration;
             try {
                 configuration = ConfigurationParser.parse(payload);
+                if (!startupAccounting.equals(configuration.accounting())) {
+                    throw new IllegalArgumentException("accounting namespace, deployment endpoint, recovery mode, instance ID, cohort and expected instances are startup-only; "
+                            + "quiesce every owner and complete explicit cohort maintenance before restarting");
+                }
                 quotaFlow.replacePolicySet(configuration.policySet());
             } catch (RuntimeException e) {
                 log.error("configuration reload rejected; serving policy set unchanged: {}",
@@ -144,6 +150,7 @@ public final class ConfigReloader implements AutoCloseable {
         private final ConfigSource source;
         private final DefaultQuotaFlow quotaFlow;
         private Duration pollInterval = DEFAULT_POLL_INTERVAL;
+        private StartupAccounting startupAccounting = StartupAccounting.defaults();
         private final List<Runnable> onApplied = new ArrayList<>();
 
         private Builder(ConfigSource source, DefaultQuotaFlow quotaFlow) {
@@ -163,6 +170,12 @@ public final class ConfigReloader implements AutoCloseable {
         /** Hook executed after each successfully applied reload (e.g. resolver cache clear). */
         public Builder onApplied(Runnable hook) {
             onApplied.add(Objects.requireNonNull(hook, "hook"));
+            return this;
+        }
+
+        /** Captures the accounting settings used to construct the serving store, never a later source payload. */
+        public Builder startupAccounting(StartupAccounting accounting) {
+            this.startupAccounting = Objects.requireNonNull(accounting, "accounting");
             return this;
         }
 

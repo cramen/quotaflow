@@ -3,6 +3,7 @@ package io.quotaflow.store.redis;
 import io.lettuce.core.ClientOptions;
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.SocketOptions;
+import io.lettuce.core.TimeoutOptions;
 import java.time.Duration;
 import java.util.Objects;
 import org.slf4j.Logger;
@@ -42,14 +43,22 @@ public final class RedisClientFactory {
      * disabling any incomplete native transport. The caller owns the client.
      */
     public static RedisClient createClient(String url, Duration connectTimeout) {
+        return createClient(url, connectTimeout, connectTimeout);
+    }
+
+    /** Bounded, disconnected-rejecting transport with replay disabled for all library commands. */
+    public static RedisClient createClient(String url, Duration connectTimeout, Duration commandTimeout) {
         Objects.requireNonNull(url, "url");
         Objects.requireNonNull(connectTimeout, "connectTimeout");
+        Objects.requireNonNull(commandTimeout, "commandTimeout");
         disableIncompleteNativeTransports();
         RedisClient client = RedisClient.create(url);
         client.setOptions(ClientOptions.builder()
-                .socketOptions(SocketOptions.builder()
-                        .connectTimeout(connectTimeout)
-                        .build())
+                .socketOptions(SocketOptions.builder().connectTimeout(connectTimeout).build())
+                .disconnectedBehavior(ClientOptions.DisconnectedBehavior.REJECT_COMMANDS)
+                .requestQueueSize(4096)
+                .replayFilter(command -> false)
+                .timeoutOptions(TimeoutOptions.enabled(commandTimeout))
                 .build());
         return client;
     }

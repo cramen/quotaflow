@@ -50,6 +50,20 @@ public final class NativeSmoke {
         } finally { provisioningClient.shutdown(); }
         try (RedisRateLimitStore store =
                 RedisRateLimitStore.connect(url, RedisStoreConfig.defaults(), Duration.ofSeconds(10))) {
+            var domain = new QuotaDomain(namespace, "root");
+            store.registerPolicies(List.of(new io.quotaflow.core.store.PolicyBinding(domain, "root", Scope.GLOBAL, Algorithm.TOKEN_BUCKET),
+                    new io.quotaflow.core.store.PolicyBinding(domain, "tenant", Scope.TENANT, Algorithm.GCRA))).toCompletableFuture().join();
+            var adminClient = io.quotaflow.store.redis.RedisClientFactory.createClient(url, Duration.ofSeconds(10));
+            try (var connection = adminClient.connect()) {
+                var controller = new io.quotaflow.store.redis.RedisRecoveryController(connection, Duration.ofSeconds(10));
+                var cohort = io.quotaflow.core.store.RecoveryCohort.single();
+                controller.provisionCohort(namespace, cohort, "initial", true, true).toCompletableFuture().join();
+                controller.provisionDomain(domain, cohort, "initial", "a".repeat(64), true, true).toCompletableFuture().join();
+                var owner = controller.enroll(namespace, cohort, "single", java.util.UUID.randomUUID().toString()).toCompletableFuture().join();
+                var gather = controller.attach(domain, owner).toCompletableFuture().join().context();
+                var drain = controller.join(gather).toCompletableFuture().join().context();
+                store.bindRecoveryContext(controller.ready(drain).toCompletableFuture().join().context());
+            } finally { adminClient.shutdown(); }
             ChainResult result = store.tryAcquireAll(List.of(
                     new LevelRequest(new BucketIdentity(new QuotaDomain(namespace, "root"), "root", Scope.GLOBAL, "global"), limit, Algorithm.TOKEN_BUCKET, 1),
                     new LevelRequest(new BucketIdentity(new QuotaDomain(namespace, "root"), "tenant", Scope.TENANT, "t1"), limit, Algorithm.GCRA, 1)))

@@ -15,7 +15,7 @@ import org.springframework.context.annotation.Configuration;
 /**
  * Zero-config smoke: one policy in application properties, no declared beans —
  * the starter assembles the whole stack (facade, fallback wrapper, reload
- * pipeline, annotation machinery, 429 handler) and limits immediately.
+ * pipeline, annotation machinery, 429 handler) and rejects until ownership is validated.
  */
 @SpringBootTest(
         classes = ZeroConfigSmokeTest.TestApplication.class,
@@ -45,8 +45,8 @@ class ZeroConfigSmokeTest {
 
         RateLimitContext alice =
                 RateLimitContext.builder().put(RateLimitContext.PRINCIPAL, "alice").build();
-        assertThat(quotaFlow.tryAcquire("user-api", alice).isAllowed()).isTrue();
-        assertThat(quotaFlow.tryAcquire("user-api", alice).isAllowed()).isTrue();
+        assertThat(quotaFlow.tryAcquire("user-api", alice).isAllowed()).isFalse();
+        assertThat(quotaFlow.tryAcquire("user-api", alice).isAllowed()).isFalse();
         assertThat(quotaFlow.tryAcquire("user-api", alice).isAllowed()).isFalse();
     }
 

@@ -90,9 +90,16 @@ public final class PolicyEngine {
 
     /** Validates a complete candidate before the facade publishes it. */
     public CompletionStage<Void> registerPolicies(PolicySet policies) {
+        if (store.requiresVersionedLimits() && policies.policies().stream().anyMatch(policy -> policy.limitRef().isPresent())
+                && !(limitResolver instanceof VersionedLimitResolver))
+            throw new PolicyConfigurationException("fenced dynamic policies require a VersionedLimitResolver");
+        if (store instanceof io.quotaflow.core.store.RecoveryConfigurationAware aware)
+            aware.validateRecoveryConfiguration(policies, namespace, limitResolver);
         return store.registerPolicies(policies.policies().stream().map(policy -> new PolicyBinding(
                 new QuotaDomain(namespace, policies.rootPolicyId(policy.id())),
-                policy.id(), policy.scope(), policy.algorithm())).toList());
+                policy.id(), policy.scope(), policy.algorithm())).toList())
+                .thenCompose(ignored -> store instanceof io.quotaflow.core.store.RecoveryConfigurationAware aware
+                        ? aware.configureRecovery(policies, namespace, limitResolver) : CompletableFuture.completedFuture(null));
     }
 
     /**
@@ -122,7 +129,7 @@ public final class PolicyEngine {
             }
         }
         if (store instanceof BatchRateLimitStore batchStore) {
-            List<LevelRequest> requests = levelRequests(levels, weight);
+            List<LevelRequest> requests = levelRequests(levels, weight, policies);
             if (requests.isEmpty()) {
                 return rejectedBeforeStore(levels.get(0));
             }
@@ -158,7 +165,7 @@ public final class PolicyEngine {
             }
         }
         if (store instanceof BatchRateLimitStore batchStore) {
-            List<LevelRequest> requests = levelRequests(levels, weight);
+            List<LevelRequest> requests = levelRequests(levels, weight, policies);
             if (requests.isEmpty()) {
                 return CompletableFuture.completedFuture(rejectedBeforeStore(levels.get(0)));
             }
@@ -173,14 +180,17 @@ public final class PolicyEngine {
      * pre-store rejection level (missing key or unresolvable limit) never
      * reaches the store.
      */
-    private static List<LevelRequest> levelRequests(List<PendingLevel> levels, long weight) {
+    private List<LevelRequest> levelRequests(List<PendingLevel> levels, long weight, PolicySet policies) {
         List<LevelRequest> requests = new ArrayList<>(levels.size());
         for (PendingLevel level : levels) {
             if (!level.reachesStore()) {
                 break;
             }
             requests.add(new LevelRequest(
-                    level.storageKey(), level.limit(), level.policy().algorithm(), weight));
+                    level.storageKey(), level.limit(), level.policy().algorithm(), weight, level.keyGroup(),
+                    store instanceof io.quotaflow.core.store.RecoveryConfigurationAware
+                            ? policies.recoveryFingerprint(level.storageKey().domain().rootPolicyId()) : null,
+                    level.resolverRevision, level.resolverFingerprint));
         }
         return requests;
     }
@@ -196,6 +206,10 @@ public final class PolicyEngine {
             List<PendingLevel> levels, int resolvedCount, ChainResult result) {
         if (!result.acquired()) {
             PendingLevel fired = levels.get(result.firedLevelIndex());
+            if (result.recoveryPending() != null) {
+                return new Evaluation(Decision.rejectedWithoutSchedule(fired.policy().id(), fired.policy().scope()),
+                        fired.keyGroup(), result.recoveryPending());
+            }
             return rejection(fired, result.remaining(), result.retryAfterMillis());
         }
         if (resolvedCount < levels.size()) {
@@ -234,6 +248,14 @@ public final class PolicyEngine {
         Objects.requireNonNull(context, "context");
         List<RateLimitPolicy> chain = policies.chainFromLeaf(leafPolicyId);
         List<PendingLevel> levels = new ArrayList<>(chain.size());
+        LimitSnapshot snapshot = null;
+        if (policies.hasDynamicLimits(leafPolicyId) && store.requiresVersionedLimits() && !(limitResolver instanceof VersionedLimitResolver))
+            throw new PolicyConfigurationException("fenced dynamic policies require a VersionedLimitResolver");
+        if (policies.hasDynamicLimits(leafPolicyId) && limitResolver instanceof VersionedLimitResolver versioned) {
+            snapshot = Objects.requireNonNull(versioned.snapshot(), "snapshot result").orElse(null);
+            if (snapshot == null) return List.of(PendingLevel.unresolvableLimit(chain.get(0), "unresolvable"));
+        }
+        LimitResolver capturedResolver = snapshot == null ? limitResolver : snapshot;
         for (RateLimitPolicy policy : chain) {
             KeyResolver resolver = resolverFor(policy);
             Optional<LimitKey> resolved = resolver.resolve(context, policy);
@@ -246,7 +268,7 @@ public final class PolicyEngine {
                 }
             }
             LimitKey key = resolved.get();
-            Limit limit = effectiveLimit(policy, key.keyGroup());
+            Limit limit = effectiveLimit(policy, key.keyGroup(), capturedResolver);
             if (limit == null) {
                 log.warn(
                         "policy '{}' limit reference '{}' is unresolvable for key group '{}'; rejecting request",
@@ -257,7 +279,7 @@ public final class PolicyEngine {
             BucketIdentity storageKey = new BucketIdentity(
                     new QuotaDomain(namespace, policies.rootPolicyId(policy.id())),
                     policy.id(), policy.scope(), key.rawKey());
-            levels.add(PendingLevel.resolved(policy, storageKey, key.keyGroup(), limit));
+            levels.add(PendingLevel.resolved(policy, storageKey, key.keyGroup(), limit, snapshot));
         }
         return levels;
     }
@@ -267,7 +289,7 @@ public final class PolicyEngine {
      * {@link LimitResolver} result for a dynamic reference. Returns
      * {@code null} when the reference cannot be resolved for the key group.
      */
-    private Limit effectiveLimit(RateLimitPolicy policy, String keyGroup) {
+    private Limit effectiveLimit(RateLimitPolicy policy, String keyGroup, LimitResolver capturedResolver) {
         if (policy.limitRef().isEmpty()) {
             return policy.limit().orElseThrow();
         }
@@ -275,7 +297,7 @@ public final class PolicyEngine {
             throw new PolicyConfigurationException("policy '" + policy.id() + "' declares limit reference '"
                     + policy.limitRef().orElseThrow() + "' but no LimitResolver is configured");
         }
-        return limitResolver.resolve(policy.limitRef().orElseThrow(), keyGroup).orElse(null);
+        return capturedResolver.resolve(policy.limitRef().orElseThrow(), keyGroup).orElse(null);
     }
 
     private KeyResolver resolverFor(RateLimitPolicy policy) {
@@ -292,6 +314,10 @@ public final class PolicyEngine {
     }
 
     private static Evaluation rejection(PendingLevel level, StoreResult result) {
+        if (result.recoveryPending() != null) {
+            return new Evaluation(Decision.rejectedWithoutSchedule(level.policy().id(), level.policy().scope()),
+                    level.keyGroup(), result.recoveryPending());
+        }
         return rejection(level, result.remaining(), result.retryAfterMillis());
     }
 
@@ -322,16 +348,23 @@ public final class PolicyEngine {
         private final BucketIdentity storageKey;
         private final String keyGroup;
         private final Limit limit;
+        private final long resolverRevision;
+        private final String resolverFingerprint;
 
         private PendingLevel(RateLimitPolicy policy, BucketIdentity storageKey, String keyGroup, Limit limit) {
+            this(policy, storageKey, keyGroup, limit, null);
+        }
+        private PendingLevel(RateLimitPolicy policy, BucketIdentity storageKey, String keyGroup, Limit limit, LimitSnapshot snapshot) {
+            resolverRevision = snapshot == null ? 0 : snapshot.revision();
+            resolverFingerprint = snapshot == null ? LimitSnapshot.NONE_FINGERPRINT : snapshot.fingerprint();
             this.policy = policy;
             this.storageKey = storageKey;
             this.keyGroup = keyGroup;
             this.limit = limit;
         }
 
-        static PendingLevel resolved(RateLimitPolicy policy, BucketIdentity storageKey, String keyGroup, Limit limit) {
-            return new PendingLevel(policy, storageKey, keyGroup, limit);
+        static PendingLevel resolved(RateLimitPolicy policy, BucketIdentity storageKey, String keyGroup, Limit limit, LimitSnapshot snapshot) {
+            return new PendingLevel(policy, storageKey, keyGroup, limit, snapshot);
         }
 
         static PendingLevel missingKey(RateLimitPolicy policy) {

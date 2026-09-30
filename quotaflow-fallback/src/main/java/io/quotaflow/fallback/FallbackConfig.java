@@ -4,21 +4,9 @@ import java.time.Duration;
 import java.util.Objects;
 
 /**
- * Tuning for {@link FallbackRateLimitStore}.
- *
- * @param failureThreshold consecutive primary store failures that trip the
- *                         breaker open
- * @param openDuration how long the breaker stays open before the first probe;
- *                     should be at least the primary store's command timeout,
- *                     so a stalled store does not eat a probe immediately
- * @param maxOpenDuration cap for the backoff that doubles the open duration
- *                        after each failed probe or seeding attempt
- * @param expectedInstances expected number of running instances; degraded
- *                          limits are divided by it so the summed degraded
- *                          flow never exceeds the global limit. The default 1
- *                          disables division and triggers a startup warning.
- * @param maxSeedEntries hard cap on bucket entries replayed into the
- *                       recovered store; overflow is logged and skipped
+ * Legacy breaker configuration retained for source migration. The old store/seeder constructors
+ * reject this wiring; use {@link RecoverySettings} with a recovery-capable primary.
+ * In particular, a tracking bound never permits skipping consumed buckets during recovery.
  */
 public record FallbackConfig(
         int failureThreshold,

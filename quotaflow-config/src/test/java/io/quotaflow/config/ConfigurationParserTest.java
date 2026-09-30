@@ -252,9 +252,24 @@ class ConfigurationParserTest {
     void expectedInstancesParsesFromDefaults() {
         Map<String, String> properties = minimalPolicy("web");
         properties.put("quotaflow.defaults.expected-instances", "4");
+        properties.put("quotaflow.recovery.members", "a,b,c,d");
+        properties.put("quotaflow.recovery.instance-id", "a");
         QuotaFlowConfiguration config = ConfigurationParser.parse(properties);
         assertEquals(4, config.expectedInstances().orElseThrow());
         assertTrue(ConfigurationParser.parse(minimalPolicy("web")).expectedInstances().isEmpty());
+    }
+
+    @Test void fixedCohortMustMatchEveryDeclaredSlotAndOwnIdentity() {
+        var properties = minimalPolicy("web");
+        properties.put("quotaflow.defaults.expected-instances", "2");
+        assertThrows(IllegalArgumentException.class, () -> ConfigurationParser.parse(properties));
+        properties.put("quotaflow.recovery.instance-id", "a");
+        for (String members : java.util.List.of("a", "a,b,c", "a,a", "b,c", "a,")) {
+            properties.put("quotaflow.recovery.members", members);
+            assertThrows(IllegalArgumentException.class, () -> ConfigurationParser.parse(properties), members);
+        }
+        properties.put("quotaflow.recovery.members", "b,a");
+        assertEquals(java.util.List.of("a", "b"), ConfigurationParser.parse(properties).accounting().cohort().members());
     }
 
     @Test

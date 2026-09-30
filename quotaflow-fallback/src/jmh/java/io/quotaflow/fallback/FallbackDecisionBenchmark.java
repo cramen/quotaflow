@@ -14,29 +14,31 @@ import org.openjdk.jmh.annotations.*;
 public class FallbackDecisionBenchmark {
     @Param({"TOKEN_BUCKET"}) public Algorithm algorithm;
     private DefaultQuotaFlow flow;
-    private static final class UnavailableStore implements BatchRateLimitStore {
-        @Override public CompletionStage<ChainResult> tryAcquireAll(List<LevelRequest> chain) {
-            return CompletableFuture.failedFuture(new IllegalStateException("benchmark outage"));
-        }
-        @Override public CompletionStage<Void> registerPolicies(List<PolicyBinding> bindings) {
-            return CompletableFuture.completedFuture(null);
-        }
-        @Override public StoreResult tryAcquire(BucketIdentity key, Limit limit, Algorithm algorithm, long weight) {
-            throw new IllegalStateException("benchmark outage");
-        }
-        @Override public CompletionStage<StoreResult> tryAcquireAsync(BucketIdentity key, Limit limit, Algorithm algorithm, long weight) {
-            return CompletableFuture.failedFuture(new IllegalStateException("benchmark outage"));
-        }
-    }
-    @Setup public void setup() {
+    private FallbackRateLimitStore store;
+    @Setup public void setup() throws Exception {
         var limit = new Limit(1_000_000_000, 1_000_000, Duration.ofSeconds(1));
         var policy = RateLimitPolicy.builder("fallback").scope(io.quotaflow.core.Scope.GLOBAL)
                 .algorithm(algorithm).limit(limit).build();
-        var store = new FallbackRateLimitStore(new UnavailableStore(), StateSeeder.noOp(),
-                new FallbackConfig(1, Duration.ofHours(1), Duration.ofHours(1), 1, 100), List.of());
-        flow = DefaultQuotaFlow.builder(PolicySet.compile(List.of(policy)), store).build();
+        var policies = PolicySet.compile(List.of(policy));
+        var primary = new io.quotaflow.testing.RecoveryPrimaryFixture(policies);
+        var offset = new java.util.concurrent.atomic.AtomicLong();
+        store = new FallbackRateLimitStore(primary, new RecoverySettings("default", "benchmark", "single",
+                RecoveryCohort.single(), 100, 100, Duration.ofMillis(10), Duration.ofSeconds(1)), List.of(),
+                () -> System.nanoTime() + offset.get());
+        flow = DefaultQuotaFlow.builder(policies, store).build();
+        long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+        while (store.state() != DegradationState.CLOSED && System.nanoTime() < deadline) Thread.sleep(5);
+        if (store.state() != DegradationState.CLOSED) throw new IllegalStateException("benchmark enrollment failed");
+        primary.available = false;
+        flow.tryAcquire("fallback", RateLimitContext.empty());
+        flow.tryAcquire("fallback", RateLimitContext.empty());
+        // Earn credit through the real cold guard before measuring its allow path.
+        offset.set(Duration.ofSeconds(500).toNanos());
+        flow.tryAcquire("fallback", RateLimitContext.empty(), limit.capacity());
+        offset.set(Duration.ofSeconds(1000).toNanos());
         acquire();
     }
+    @TearDown public void close() { store.close(); }
     @Benchmark public Decision acquire() {
         Decision result = flow.tryAcquire("fallback", RateLimitContext.empty());
         if (!result.isAllowed()) throw new IllegalStateException("allow-path benchmark exhausted its quota");

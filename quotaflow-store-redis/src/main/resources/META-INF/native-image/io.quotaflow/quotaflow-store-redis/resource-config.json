@@ -21,6 +21,15 @@
       },
       {
         "pattern": "\\Qlua/numeric_state.lua\\E"
+      },
+      {
+        "pattern": "\\Qlua/recovery_membership.lua\\E"
+      },
+      {
+        "pattern": "\\Qlua/recovery_control.lua\\E"
+      },
+      {
+        "pattern": "\\Qlua/recovery_guard.lua\\E"
       }
     ]
   }

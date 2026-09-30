@@ -1,5 +1,6 @@
 plugins {
     `java-library`
+    `java-test-fixtures`
     alias(libs.plugins.jmh)
 }
 
@@ -21,6 +22,8 @@ extra["dependencyAuditAllowlist"] = listOf(
 
 dependencies {
     api(project(":quotaflow-core"))
+    testFixturesApi(project(":quotaflow-core"))
+    testFixturesApi(libs.lettuce.core)
     api(libs.lettuce.core)
 
     testImplementation(platform(libs.junit.bom))

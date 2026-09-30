@@ -14,7 +14,7 @@ class CanonicalHierarchyTckTest extends TckContainers {
         for (Algorithm algorithm : Algorithm.values()) HierarchyConformance.verify(new LocalRateLimitStore(), algorithm);
     }
     private void verify(String uri) throws Exception {
-        try (var store = RedisRateLimitStore.create(newClient(uri),
+        try (var store = io.quotaflow.testing.RecoveryStoreFixture.create(newClient(uri),
                 new RedisStoreConfig(Duration.ofSeconds(2), Duration.ofSeconds(4)))) {
             for (Algorithm algorithm : Algorithm.values()) HierarchyConformance.verify(store, algorithm);
         }

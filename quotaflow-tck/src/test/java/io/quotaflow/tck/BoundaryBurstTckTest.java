@@ -60,7 +60,7 @@ class BoundaryBurstTckTest extends TckContainers {
         String key = uniqueKey("burst:global:" + algorithm.name().toLowerCase());
         RedisClient client = newClient(uri);
         try (StatefulRedisConnection<String, String> serverTime = client.connect();
-                RedisRateLimitStore store = RedisRateLimitStore.create(client, RedisStoreConfig.defaults())) {
+                RedisRateLimitStore store = io.quotaflow.testing.RecoveryStoreFixture.create(client, RedisStoreConfig.defaults())) {
             // phase 1: drain the bucket; a fresh bucket admits its capacity plus
             // at most the refill over the measured drain span
             long drainStart = serverTimeMicros(serverTime);

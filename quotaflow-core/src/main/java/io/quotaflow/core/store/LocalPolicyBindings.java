@@ -52,6 +52,10 @@ public final class LocalPolicyBindings {
         if (!binding.equals(bindings.get(key(binding)))) register(List.of(binding));
     }
 
+    public boolean containsDomain(QuotaDomain domain) {
+        return bindings.values().stream().anyMatch(binding -> binding.domain().equals(domain));
+    }
+
     public int size(String namespace) {
         return (int) bindings.keySet().stream().filter(key -> key.namespace().equals(namespace)).count();
     }

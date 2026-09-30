@@ -55,7 +55,7 @@ class CrossInstanceRaceTckTest extends TckContainers {
         for (int i = 0; i < INSTANCES; i++) {
             RedisClient client = newClient(uri);
             clients.add(client);
-            stores.add(RedisRateLimitStore.create(client, RedisStoreConfig.defaults()));
+            stores.add(io.quotaflow.testing.RecoveryStoreFixture.create(client, RedisStoreConfig.defaults()));
         }
 
         AtomicLong allowed = new AtomicLong();

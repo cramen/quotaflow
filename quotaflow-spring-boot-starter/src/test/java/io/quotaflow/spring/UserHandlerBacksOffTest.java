@@ -55,6 +55,12 @@ class UserHandlerBacksOffTest {
     @Configuration(proxyBeanMethods = false)
     @EnableAutoConfiguration
     static class TestApplication {
+        // These tests exercise HTTP mapping with an explicitly selected local store.
+        @org.springframework.context.annotation.Bean
+        io.quotaflow.core.store.RateLimitStore localStore() {
+            return new io.quotaflow.core.store.LocalRateLimitStore();
+        }
+
 
         @Bean
         RateLimitExceptionHandler customRateLimitExceptionHandler() {

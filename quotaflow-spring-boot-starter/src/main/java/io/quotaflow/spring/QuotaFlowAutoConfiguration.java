@@ -15,7 +15,9 @@ import io.quotaflow.core.store.RateLimitStore;
 import io.quotaflow.core.store.StateSeeder;
 import io.quotaflow.fallback.DegradationListener;
 import io.quotaflow.fallback.FallbackConfig;
-import io.quotaflow.fallback.FallbackRateLimitStore;
+import io.quotaflow.fallback.CoordinatedFallbackStore;
+import io.quotaflow.fallback.ReconnectingRecoveryPrimary;
+import io.quotaflow.fallback.RecoverySettings;
 import io.quotaflow.micrometer.MicrometerDecisionListener;
 import io.quotaflow.micrometer.MicrometerDegradationListener;
 import io.quotaflow.micrometer.MicrometerThrottleMetrics;
@@ -83,58 +85,49 @@ public class QuotaFlowAutoConfiguration {
         return configuration;
     }
 
-    /**
-     * Primary store: Redis when the driver is present and the broker answers,
-     * otherwise local-only mode (per-instance limits) with a loud warning —
-     * or fail-fast when {@code quotaflow.fail-on-redis-missing=true}.
-     */
+    /** Owned transport is reconnectable; an unenrolled startup never receives quota credit. */
     @Bean(destroyMethod = "close")
     @ConditionalOnMissingBean(RateLimitStore.class)
-    PrimaryStoreHolder quotaFlowPrimaryStore(QuotaFlowProperties properties) {
-        if (!LETTUCE_PRESENT) {
-            log.warn("Lettuce is not on the classpath; starting in local-only mode:"
-                    + " rate limits are enforced per instance and are not shared across the fleet");
-            return localOnly();
-        }
-        try {
-            return RedisStoreFactory.connect(properties.getRedis());
-        } catch (RuntimeException | LinkageError e) {
-            if (properties.isFailOnRedisMissing()) {
-                throw new IllegalStateException("could not connect to Redis at '"
-                        + properties.getRedis().getUrl() + "' (" + e.getMessage() + ") and"
-                        + " quotaflow.fail-on-redis-missing=true; fix quotaflow.redis.url, make Redis"
-                        + " reachable, or unset the flag to start in local-only mode", e);
+    ReconnectingRecoveryPrimary quotaFlowPrimaryStore(QuotaFlowProperties properties) {
+        if (!LETTUCE_PRESENT && properties.isFailOnRedisMissing())
+            throw new IllegalStateException("Redis driver is absent and quotaflow.fail-on-redis-missing=true");
+        var capturedEndpoint = new QuotaFlowProperties.Redis();
+        capturedEndpoint.setUrl(properties.getRedis().getUrl());
+        capturedEndpoint.setConnectTimeout(properties.getRedis().getConnectTimeout());
+        capturedEndpoint.setCommandTimeout(properties.getRedis().getCommandTimeout());
+        capturedEndpoint.setBusinessTimeout(properties.getRedis().getBusinessTimeout());
+        String capturedNamespace = properties.getNamespace();
+        ReconnectingRecoveryPrimary primary = new ReconnectingRecoveryPrimary(() -> {
+            if (!LETTUCE_PRESENT) throw new io.quotaflow.core.store.PrimaryDispatchException(
+                    io.quotaflow.core.store.PrimaryDispatchException.Outcome.NOT_DISPATCHED);
+            return RedisStoreFactory.recoveryConnection(capturedEndpoint, capturedNamespace);
+        }, capturedEndpoint.getConnectTimeout());
+        if (properties.isFailOnRedisMissing()) {
+            try { primary.probe().toCompletableFuture().join(); }
+            catch (RuntimeException failure) {
+                primary.close();
+                // Endpoint URLs and nested driver failures may contain credentials.
+                throw new IllegalStateException("Redis is unavailable and quotaflow.fail-on-redis-missing=true; verify the driver and endpoint");
             }
-            log.warn("no reachable Redis at '{}'; starting in local-only mode: rate limits are enforced"
-                    + " per instance and are not shared across the fleet ({})",
-                    properties.getRedis().getUrl(), e.toString());
-            return localOnly();
         }
+        return primary;
     }
 
-    private static PrimaryStoreHolder localOnly() {
-        LocalRateLimitStore local = new LocalRateLimitStore();
-        return new PrimaryStoreHolder(local, StateSeeder.noOp(), () -> {
-        });
-    }
-
-    /** Conservative fallback wrapper around the primary store; always present. */
-    @Bean
+    /** Fixed-cohort conservative recovery, including provisional startup with zero credit. */
+    @Bean(destroyMethod = "close")
     @ConditionalOnMissingBean(RateLimitStore.class)
-    FallbackRateLimitStore rateLimitStore(
-            PrimaryStoreHolder primary, QuotaFlowProperties properties, QuotaFlowConfiguration configuration,
+    CoordinatedFallbackStore rateLimitStore(
+            ReconnectingRecoveryPrimary primary, QuotaFlowProperties properties, QuotaFlowConfiguration configuration,
             ObjectProvider<DegradationListener> degradationListeners,
             ObjectProvider<MeterRegistry> meterRegistry) {
         List<DegradationListener> listeners = new ArrayList<>(degradationListeners.orderedStream().toList());
         meterRegistry.ifAvailable(registry -> listeners.add(new MicrometerDegradationListener(registry)));
+        var accounting = configuration.accounting();
         QuotaFlowProperties.Fallback fallback = properties.getFallback();
-        FallbackConfig config = new FallbackConfig(
-                fallback.getFailureThreshold(),
-                fallback.getOpenDuration(),
-                fallback.getMaxOpenDuration(),
-                configuration.expectedInstances().orElse(1),
-                fallback.getMaxSeedEntries());
-        return new FallbackRateLimitStore(primary.store(), primary.seeder(), config, listeners);
+        RecoverySettings settings = new RecoverySettings(accounting.namespace(), accounting.deploymentId(),
+                accounting.instanceId(), accounting.cohort(), fallback.getMaxSeedEntries(), 4096,
+                fallback.getOpenDuration(), properties.getRedis().getBusinessTimeout());
+        return new CoordinatedFallbackStore(primary, settings, listeners);
     }
 
     /**
@@ -192,10 +185,12 @@ public class QuotaFlowAutoConfiguration {
     @ConditionalOnMissingBean
     ConfigReloader quotaFlowConfigReloader(
             ConfigurableEnvironment environment, DefaultQuotaFlow quotaFlow, QuotaFlowProperties properties,
+            QuotaFlowConfiguration configuration,
             ObjectProvider<CachingLimitResolver> cachingResolver,
             ObjectProvider<MicrometerThrottleMetrics> throttleMetrics) {
         EnvironmentConfigSource source = new EnvironmentConfigSource(environment);
         return ConfigReloader.builder(source, quotaFlow)
+                .startupAccounting(configuration.accounting())
                 .pollInterval(properties.getReload().getPollInterval())
                 .onApplied(() -> policySets.refreshFrom(source))
                 .onApplied(() -> cachingResolver.ifAvailable(CachingLimitResolver::clear))

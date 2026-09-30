@@ -30,6 +30,7 @@ dependencies {
     compileOnly(libs.micrometer.tracing)
 
     testImplementation(project(":quotaflow-fallback"))
+    testImplementation(testFixtures(project(":quotaflow-fallback")))
     testImplementation(libs.micrometer.tracing)
     testImplementation(libs.micrometer.tracing.test)
     testImplementation(libs.jackson.databind)

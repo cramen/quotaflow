@@ -16,7 +16,21 @@ package io.quotaflow.core.store;
  * level would admit the request; it is undefined (zero) when {@code acquired}
  * is true.
  */
-public record ChainResult(boolean acquired, int firedLevelIndex, long remaining, long retryAfterMillis) {
+public record ChainResult(boolean acquired, int firedLevelIndex, long remaining, long retryAfterMillis, RecoveryPending recoveryPending) {
+
+    public ChainResult(boolean acquired, int firedLevelIndex, long remaining, long retryAfterMillis) {
+        this(acquired, firedLevelIndex, remaining, retryAfterMillis, null);
+    }
+
+    public ChainResult {
+        if (recoveryPending != null && (acquired || remaining != 0 || retryAfterMillis != 0)) {
+            throw new IllegalArgumentException("recovery-pending outcome cannot grant quota or a refill schedule");
+        }
+    }
+
+    public static ChainResult pending(int firedLevelIndex, RecoveryPending pending) {
+        return new ChainResult(false, firedLevelIndex, 0, 0, java.util.Objects.requireNonNull(pending, "pending"));
+    }
 
     public static ChainResult acquired(int firedLevelIndex, long minRemaining) {
         return new ChainResult(true, firedLevelIndex, minRemaining, 0);

@@ -26,9 +26,12 @@ class RedisRateLimitStoreConnectTest extends RedisContainerSupport {
     void connectCreatesAWorkingStoreAndOwnsTheClient() {
         RedisRateLimitStore store = RedisRateLimitStore.connect(
                 redisUri(), RedisStoreConfig.defaults(), Duration.ofSeconds(2));
-        try {
+        try (var adminConnection = client().connect()) {
+            var identity = key(storageKey("connect", "global", "k"));
+            io.quotaflow.testing.RecoveryStoreFixture.prepareFor(store, adminConnection,
+                    java.util.List.of(io.quotaflow.core.store.PolicyBinding.of(identity, Algorithm.TOKEN_BUCKET)));
             assertTrue(store.tryAcquire(
-                            key(storageKey("connect", "global", "k")), new Limit(1, 1, Duration.ofSeconds(1)),
+                            identity, new Limit(1, 1, Duration.ofSeconds(1)),
                             Algorithm.TOKEN_BUCKET, 1)
                     .acquired());
         } finally {

@@ -3,16 +3,17 @@ package io.quotaflow.config;
 import io.quotaflow.core.PolicySet;
 import java.util.Optional;
 
-/**
- * Result of parsing and compiling a configuration payload: the validated,
- * immutable {@link PolicySet} plus the fallback tuning knob
- * {@code expectedInstances} when declared under {@code quotaflow.defaults.}.
- * The policy set is what a reload swaps atomically; {@code expectedInstances}
- * is consumed by degradation wiring (fallback store configuration).
- */
-public record QuotaFlowConfiguration(PolicySet policySet, Optional<Integer> expectedInstances) {
+/** Validated policies and normalized startup accounting, captured before any reload publication. */
+public record QuotaFlowConfiguration(PolicySet policySet, Optional<Integer> expectedInstances, StartupAccounting accounting) {
+
+    public QuotaFlowConfiguration(PolicySet policySet, Optional<Integer> expectedInstances) {
+        this(policySet, expectedInstances, StartupAccounting.defaults());
+    }
 
     public QuotaFlowConfiguration {
+        if (accounting == null) throw new NullPointerException("accounting");
+        if (expectedInstances != null && expectedInstances.orElse(1) != accounting.expectedInstances())
+            throw new IllegalArgumentException("expected instances differ from startup accounting");
         if (policySet == null) {
             throw new NullPointerException("policySet");
         }

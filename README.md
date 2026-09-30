@@ -9,11 +9,11 @@ Enterprise-grade **distributed rate limiting library for JVM microservices** —
 
 - **Hierarchical policies**: global → tenant → user → API-key, including external provider quotas (e.g. a shared LLM API quota) as a parent level. Chains evaluate atomically in one Redis round-trip.
 - **Two reaction modes**: `reject` (correct HTTP 429 with `Retry-After` and an RFC 7807 body) and `throttle` (bounded priority queue with backpressure and wait timeouts — a "budget valve" for paid external APIs).
-- **Degradation, not fail-open/fail-closed**: on Redis failure, automatic fallback to a conservative local limiter (limit ÷ instances) with spike-free recovery via state seeding.
+- **Degradation, not fail-open/fail-closed**: on Redis failure, validated owners use cold conservative shares, then recover through a fixed-cohort Redis barrier. Unenrolled startup grants no credit.
 - **Atomic correctness**: Lua token bucket and GCRA only — no read-modify-write, boundary-burst protection, Redis server time for refill math.
-- **Dynamic configuration**: hot-reload of policies without restarts, plus a tariff resolver SPI for per-key limits from billing/CRM systems (TTL-cached).
+- **Dynamic configuration**: hot-reload of policies without restarts, plus a tariff resolver SPI for limits from billing/CRM systems. Fenced dynamic quotas use immutable versioned snapshots.
 - **First-class observability**: every decision (allow/reject/wait) is metered by policy and key-group; utilization, degradation state, and wait metrics included; reference Grafana dashboard and alerts.
-- **Zero-config DX**: Spring Boot starter (`@RateLimited`, servlet + WebFlux) and a Kotlin coroutines facade (`suspend` / `Flow` / DSL).
+- **Framework integration**: Spring Boot starter (`@RateLimited`, servlet + WebFlux) and a Kotlin coroutines facade (`suspend` / `Flow` / DSL).
 - **GraalVM ready**: reachability metadata and Spring AOT hints, verified by a native-image smoke build.
 
 ## Requirements
@@ -47,6 +47,9 @@ quotaflow.policies.tenant-gold.limit.refill-period=PT1M
 public CompletionStage<Answer> chat(String tenantId, Prompt prompt) { ... }
 ```
 
+Provision the namespace, fixed cohort and root controllers before activation; see
+[conservative recovery and the single-owner setup](docs/conservative-recovery.md).
+
 An exhausted limit produces `429 Too Many Requests` with a `Retry-After`
 header and an `application/problem+json` body naming the policy and the fired
 level. Throttle-mode policies instead queue callers with backpressure:
@@ -56,7 +59,7 @@ level. Throttle-mode policies instead queue callers with backpressure:
 ```
 
 Non-Spring applications use `io.quotaflow:quotaflow-core` plus a store module
-(`quotaflow-store-redis`) directly; coroutine applications use
+(`quotaflow-store-redis`) with the `quotaflow-fallback` coordinator; coroutine applications use
 `io.quotaflow:quotaflow-kotlin` for the `suspend` API.
 
 ## Observability

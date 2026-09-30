@@ -34,7 +34,7 @@ class RedisStoreFactoryTest {
     void connectDelegatesToTheStoreModuleGuard() {
         System.clearProperty("io.lettuce.core.epoll");
 
-        assertThatThrownBy(() -> RedisStoreFactory.connect(unreachableRedis()))
+        assertThatThrownBy(() -> RedisStoreFactory.recoveryConnection(unreachableRedis(), "default"))
                 // unreachable endpoint: connection fails, but only after the delegated guard ran
                 .isInstanceOf(Exception.class);
 
@@ -45,7 +45,7 @@ class RedisStoreFactoryTest {
     void delegationRespectsAnExplicitUserSetting() {
         System.setProperty("io.lettuce.core.epoll", "true");
 
-        assertThatThrownBy(() -> RedisStoreFactory.connect(unreachableRedis()))
+        assertThatThrownBy(() -> RedisStoreFactory.recoveryConnection(unreachableRedis(), "default"))
                 .isInstanceOf(Exception.class);
 
         assertThat(System.getProperty("io.lettuce.core.epoll")).isEqualTo("true");

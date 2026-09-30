@@ -11,7 +11,7 @@ class NumericConformanceTckTest extends TckContainers {
     @Test void valkeyNumericContract() { verify(valkeyUri()); }
     private void verify(String uri) {
         try (var connection = newClient(uri).connect();
-                var store = new RedisRateLimitStore(connection, RedisStoreConfig.defaults())) {
+                var store = new io.quotaflow.testing.RecoveryStoreFixture(connection, RedisStoreConfig.defaults())) {
             NumericConformance.verify(store);
         }
     }

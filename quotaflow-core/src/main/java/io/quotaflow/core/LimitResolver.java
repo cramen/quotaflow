@@ -14,6 +14,10 @@ import java.util.Optional;
  * in-memory lookups; blocking external calls inside a resolver are the
  * resolver author's responsibility.
  *
+ * <p>Fenced Redis/coordinated dynamic policies require {@link VersionedLimitResolver}
+ * so one complete view and its provider revision survive preflight and recovery.
+ * This unversioned SPI remains available for local/non-coordinated stores.
+ *
  * <p>An empty result means the reference cannot be resolved for this key
  * group; the engine then rejects the request (never an unconditional allow).
  */

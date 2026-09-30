@@ -14,7 +14,7 @@ import io.quotaflow.core.RateLimitPolicy;
 import io.quotaflow.core.Scope;
 import io.quotaflow.core.store.LocalRateLimitStore;
 import io.quotaflow.core.store.RateLimitStore;
-import io.quotaflow.fallback.FallbackRateLimitStore;
+import io.quotaflow.fallback.CoordinatedFallbackStore;
 import io.quotaflow.micrometer.MicrometerThrottleMetrics;
 import java.time.Duration;
 import java.util.List;
@@ -46,7 +46,7 @@ class QuotaFlowAutoConfigurationTest {
     void assemblesFullStackByDefault() {
         runner.run(context -> {
             assertThat(context)
-                    .hasSingleBean(FallbackRateLimitStore.class)
+                    .hasSingleBean(CoordinatedFallbackStore.class)
                     .hasSingleBean(DefaultQuotaFlow.class)
                     .hasSingleBean(ConfigReloader.class)
                     .hasSingleBean(RateLimitInterceptor.class)
@@ -58,7 +58,7 @@ class QuotaFlowAutoConfigurationTest {
             QuotaFlow flow = context.getBean(QuotaFlow.class);
             RateLimitContext alice =
                     RateLimitContext.builder().put(RateLimitContext.PRINCIPAL, "alice").build();
-            assertThat(flow.tryAcquire("user-api", alice).isAllowed()).isTrue();
+            assertThat(flow.tryAcquire("user-api", alice).isAllowed()).isFalse();
         });
     }
 
@@ -71,13 +71,13 @@ class QuotaFlowAutoConfigurationTest {
                         .doesNotHaveBean(QuotaFlow.class)
                         .doesNotHaveBean(ConfigReloader.class)
                         .doesNotHaveBean(RateLimitInterceptor.class)
-                        .doesNotHaveBean(FallbackRateLimitStore.class));
+                        .doesNotHaveBean(CoordinatedFallbackStore.class));
     }
 
     @Test
     void userStoreWins() {
         runner.withUserConfiguration(UserStoreConfiguration.class).run(context -> {
-            assertThat(context).doesNotHaveBean(FallbackRateLimitStore.class);
+            assertThat(context).doesNotHaveBean(CoordinatedFallbackStore.class);
             assertThat(context).hasSingleBean(RateLimitStore.class);
             assertThat(context).hasSingleBean(DefaultQuotaFlow.class);
         });
@@ -96,15 +96,21 @@ class QuotaFlowAutoConfigurationTest {
     }
 
     @Test
-    void lettuceAbsentStartsInLocalOnlyMode() {
+    void lettuceAbsentStartsWithZeroCreditAndVisibleDegradation() {
         runner.withClassLoader(new FilteredClassLoader("io.lettuce")).run(context -> {
-            assertThat(context).hasSingleBean(FallbackRateLimitStore.class);
+            assertThat(context).hasSingleBean(CoordinatedFallbackStore.class);
             assertThat(context).hasSingleBean(DefaultQuotaFlow.class);
             QuotaFlow flow = context.getBean(QuotaFlow.class);
             RateLimitContext alice =
                     RateLimitContext.builder().put(RateLimitContext.PRINCIPAL, "alice").build();
-            assertThat(flow.tryAcquire("user-api", alice).isAllowed()).isTrue();
+            assertThat(flow.tryAcquire("user-api", alice).isAllowed()).isFalse();
         });
+    }
+
+    @Test void missingDriverHonorsFailFast() {
+        runner.withClassLoader(new FilteredClassLoader("io.lettuce"))
+                .withPropertyValues("quotaflow.fail-on-redis-missing=true")
+                .run(context -> assertThat(context).hasFailed());
     }
 
     @Test
@@ -119,11 +125,11 @@ class QuotaFlowAutoConfigurationTest {
 
             MeterRegistry registry = context.getBean(MeterRegistry.class);
             assertThat(registry.get("quotaflow.decisions")
-                            .tags("result", "allow", "policy", "user-api", "key-group", "principal")
+                            .tags("result", "reject", "policy", "user-api", "key-group", "principal")
                             .counter()
                             .count())
                     .isOne();
-            assertThat(registry.get("quotaflow.degraded").gauge().value()).isZero();
+            assertThat(registry.get("quotaflow.degraded").gauge().value()).isOne();
         });
     }
 
@@ -138,7 +144,7 @@ class QuotaFlowAutoConfigurationTest {
             assertThat(context).hasFailed();
             assertThat(context.getStartupFailure())
                     .hasStackTraceContaining("quotaflow.fail-on-redis-missing=true")
-                    .hasStackTraceContaining("local-only");
+                    .hasStackTraceContaining("Redis is unavailable");
         });
     }
 

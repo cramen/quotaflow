@@ -40,6 +40,71 @@ class ConfigReloaderTest {
             .builder(ConfigurationParser.parse(payload(2)).policySet(), new LocalRateLimitStore())
             .build();
 
+    @Test void endpointDefaultsAreEquivalentAndCredentialDiagnosticsAreRedacted() {
+        assertEquals(StartupAccounting.fingerprintEndpoint("redis://localhost:6379"), StartupAccounting.fingerprintEndpoint("REDIS://LOCALHOST/0"));
+        var candidate = payload(2);
+        candidate.put("quotaflow.redis.url", "redis://user:secret-password@localhost:6379");
+        var accounting = ConfigurationParser.parse(candidate).accounting();
+        assertFalse(accounting.toString().contains("secret-password"));
+        var reloader = ConfigReloader.builder(source, quotaFlow).build();
+        source.update(candidate);
+        var rejected = reloader.reload(); assertFalse(rejected.applied());
+        assertFalse(rejected.error().contains("secret-password"));
+        candidate.put("quotaflow.redis.url", "redis://bad secret-password");
+        var failure = assertThrows(IllegalArgumentException.class, () -> ConfigurationParser.parse(candidate));
+        assertFalse(failure.getMessage().contains("secret-password"));
+        candidate.put("quotaflow.redis.url", "redis://localhost");
+        candidate.put("quotaflow.recovery.mode", "COORDINATED");
+        source.update(candidate); assertTrue(reloader.reload().applied());
+    }
+
+    @Test void accountingChangeRejectsTheEntireCandidateBeforePolicyPublicationOrHooks() {
+        AtomicInteger hooks = new AtomicInteger();
+        var reloader = ConfigReloader.builder(source, quotaFlow).onApplied(hooks::incrementAndGet).build();
+        var changed = payload(20);
+        changed.put("quotaflow.defaults.expected-instances", "2");
+        changed.put("quotaflow.recovery.members", "a,b");
+        changed.put("quotaflow.recovery.instance-id", "a");
+        source.update(changed);
+        assertFalse(reloader.reload().applied());
+        assertEquals(0, hooks.get());
+        assertTrue(quotaFlow.tryAcquire("u", ALICE).isAllowed());
+        assertTrue(quotaFlow.tryAcquire("u", ALICE).isAllowed());
+        assertFalse(quotaFlow.tryAcquire("u", ALICE).isAllowed());
+        var equivalent = payload(2);
+        equivalent.put("quotaflow.defaults.expected-instances", "1");
+        equivalent.put("quotaflow.namespace", "default");
+        equivalent.put("quotaflow.recovery.members", "single");
+        equivalent.put("quotaflow.recovery.instance-id", "single");
+        equivalent.put("quotaflow.recovery.deployment-id", "default");
+        source.update(equivalent);
+        assertTrue(reloader.reload().applied());
+        assertEquals(1, hooks.get());
+    }
+
+    @Test void capturesTheServingCohortAndRejectsIdentityOrNamespaceChanges() {
+        var initial = payload(2);
+        initial.put("quotaflow.defaults.expected-instances", "2");
+        initial.put("quotaflow.recovery.members", "a,b");
+        initial.put("quotaflow.recovery.instance-id", "a");
+        var accounting = ConfigurationParser.parse(initial).accounting();
+        var reloader = ConfigReloader.builder(source, quotaFlow).startupAccounting(accounting).build();
+        source.update(initial);
+        assertTrue(reloader.reload().applied());
+        var reordered = new LinkedHashMap<>(initial);
+        reordered.put("quotaflow.recovery.members", "b, a");
+        source.update(reordered);
+        assertTrue(reloader.reload().applied());
+        for (var replacement : Map.of("quotaflow.recovery.instance-id", "b", "quotaflow.recovery.members", "a,c",
+                "quotaflow.namespace", "other", "quotaflow.recovery.deployment-id", "other",
+                "quotaflow.redis.url", "redis://other:6379", "quotaflow.recovery.mode", "uncoordinated").entrySet()) {
+            var candidate = new LinkedHashMap<>(initial);
+            candidate.put(replacement.getKey(), replacement.getValue());
+            source.update(candidate);
+            assertFalse(reloader.reload().applied(), replacement.getKey());
+        }
+    }
+
     @Test
     void reloadAppliesNewLimitsWithoutRestart() throws Exception {
         ConfigReloader reloader = ConfigReloader.builder(source, quotaFlow)

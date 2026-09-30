@@ -24,19 +24,16 @@ import org.junit.jupiter.api.Test;
  * Parity between the Lua algorithms and {@link LocalRateLimitStore} as the
  * reference oracle (deterministic injectable clock).
  *
- * <p>Each step pipelines TIME and the script into one flush, so the oracle's
- * clock is set to the server's own time microseconds before the script runs —
- * both sides evaluate from the same timestamp at microsecond precision, and
- * verdict/remaining comparisons are exact. Retry-after is compared with a
- * 2 ms tolerance: it is a ceiling to whole milliseconds of a duration measured
- * from two server-side reads microseconds apart.
+ * <p>A test-only wrapper captures Redis TIME once and supplies that same value to the
+ * production numeric script and the local oracle. Scheduling delays between separate
+ * commands cannot change the expected result; verdict, remaining and retry are exact.
  */
 class RedisLocalParityTest extends RedisContainerSupport {
 
     // one token per second; five seconds to refill a full bucket
     private static final Limit LIMIT = new Limit(5, 5, Duration.ofSeconds(5));
 
-    private static final long RETRY_AFTER_TOLERANCE_MILLIS = 2;
+    private static final long RETRY_AFTER_TOLERANCE_MILLIS = 0;
 
     private record Step(long gapMillis, long weight) {
     }
@@ -137,25 +134,23 @@ class RedisLocalParityTest extends RedisContainerSupport {
         }
     }
 
-    /** TIME and the script travel in one pipeline flush, microseconds apart server-side. */
+    /** Shares one server clock observation with the numeric implementation and its oracle. */
     private static ServerCall timeThenEval(
             StatefulRedisConnection<String, String> connection, LuaScript script, String[] keys, String[] args) {
-        RedisAsyncCommands<String, String> async = connection.async();
-        RedisFuture<List<String>> time = async.time();
-        RedisFuture<List<Object>> evaluation =
-                async.eval(script.source(), ScriptOutputType.MULTI, keys, args);
+        String instrumented = "local parityTime = redis.call('TIME')\nlocal function evaluate()\n"
+                + script.source().replace("redis.call('TIME')", "parityTime")
+                + "\nend\nlocal result = evaluate()\nreturn {parityTime[1], parityTime[2], result[1], result[2], result[3]}";
+        RedisFuture<List<Object>> evaluation = connection.async().eval(instrumented, ScriptOutputType.MULTI, keys, args);
         connection.flushCommands();
         try {
-            List<String> serverTime = time.get();
             List<Object> reply = evaluation.get();
-            long serverMicros = Long.parseLong(serverTime.get(0)) * 1_000_000
-                    + Long.parseLong(serverTime.get(1));
-            return new ServerCall(serverMicros, reply);
+            long serverMicros = Long.parseLong((String) reply.get(0)) * 1_000_000 + Long.parseLong((String) reply.get(1));
+            return new ServerCall(serverMicros, reply.subList(2, 5));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new IllegalStateException("interrupted while awaiting pipelined replies", e);
+            throw new IllegalStateException("interrupted while awaiting script reply", e);
         } catch (java.util.concurrent.ExecutionException e) {
-            throw new IllegalStateException("pipelined script execution failed", e.getCause());
+            throw new IllegalStateException("script execution failed", e.getCause());
         }
     }
 

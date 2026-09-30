@@ -1,5 +1,6 @@
 plugins {
     `java-library`
+    `java-test-fixtures`
     alias(libs.plugins.jmh)
 }
 
@@ -14,6 +15,8 @@ extra["dependencyAuditAllowlist"] = listOf("org.slf4j:slf4j-api")
 
 dependencies {
     api(project(":quotaflow-core"))
+    testFixturesApi(project(":quotaflow-core"))
+    jmhImplementation(testFixtures(project(":quotaflow-fallback")))
 
     testImplementation(platform(libs.junit.bom))
     testImplementation(libs.junit.jupiter)

@@ -16,13 +16,17 @@ import java.util.function.LongSupplier;
  * delegate is never invoked. Empty (unresolvable) results are cached too, so
  * a failing tariff lookup cannot stampede the delegate.
  *
+ * <p>Versioned providers retain their complete immutable snapshot capability and
+ * are not flattened into per-entry TTL caches. Their snapshot retrieval must be
+ * a fast in-memory operation backed by externally refreshed immutable data.
+ *
  * <p>The key group — never the raw key — is the cache and resolver identity,
  * keeping cardinality bounded by construction. {@link #clear()} invalidates
  * everything; wire it into {@link ConfigReloader.Builder#onApplied(Runnable)}
  * so configuration reloads drop cached resolutions along with the old policy
  * set.
  */
-public final class CachingLimitResolver implements LimitResolver {
+public class CachingLimitResolver implements LimitResolver {
 
     /** Default resolution cache TTL. */
     public static final Duration DEFAULT_TTL = Duration.ofSeconds(60);
@@ -43,6 +47,7 @@ public final class CachingLimitResolver implements LimitResolver {
     }
 
     public static CachingLimitResolver wrap(LimitResolver delegate, Duration ttl) {
+        if (delegate instanceof io.quotaflow.core.VersionedLimitResolver versioned) return new SnapshotPreservingResolver(versioned, ttl);
         return new CachingLimitResolver(delegate, ttl, System::nanoTime);
     }
 
@@ -79,5 +84,18 @@ public final class CachingLimitResolver implements LimitResolver {
     /** Visible for tests and inspection: number of cached resolutions. */
     public int cacheSize() {
         return cache.size();
+    }
+    /** Versioned providers already publish immutable in-memory views; per-entry TTLs would mix revisions. */
+    private static final class SnapshotPreservingResolver extends CachingLimitResolver implements io.quotaflow.core.VersionedLimitResolver {
+        private final io.quotaflow.core.VersionedLimitResolver snapshots;
+        SnapshotPreservingResolver(io.quotaflow.core.VersionedLimitResolver delegate, Duration ttl) {
+            super(delegate, ttl, System::nanoTime); snapshots = delegate;
+        }
+        @Override public Optional<io.quotaflow.core.LimitSnapshot> snapshot() {
+            return Objects.requireNonNull(snapshots.snapshot(), "snapshot result");
+        }
+        @Override public Optional<Limit> resolve(String reference, String group) {
+            return io.quotaflow.core.VersionedLimitResolver.super.resolve(reference, group);
+        }
     }
 }

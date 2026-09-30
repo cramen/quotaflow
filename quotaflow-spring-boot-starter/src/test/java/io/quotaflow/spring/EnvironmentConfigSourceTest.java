@@ -10,7 +10,7 @@ import org.springframework.mock.env.MockEnvironment;
 class EnvironmentConfigSourceTest {
 
     @Test
-    void collectsPolicyAndDefaultsKeysOnly() {
+    void collectsPoliciesAndImmutableAccountingTarget() {
         MockEnvironment environment = new MockEnvironment()
                 .withProperty("quotaflow.policies.user-api.scope", "user")
                 .withProperty("quotaflow.policies.user-api.limit.capacity", "5")
@@ -29,7 +29,8 @@ class EnvironmentConfigSourceTest {
                         Map.entry("quotaflow.policies.user-api.limit.capacity", "5"),
                         Map.entry("quotaflow.policies.user-api.limit.refill-amount", "5"),
                         Map.entry("quotaflow.policies.user-api.limit.refill-period", "PT1M"),
-                        Map.entry("quotaflow.defaults.refill-period", "PT1S"));
+                        Map.entry("quotaflow.defaults.refill-period", "PT1S"),
+                        Map.entry("quotaflow.redis.url", "redis://example:6379"));
         assertThat(ConfigurationParser.parse(payload).policySet().size()).isEqualTo(1);
     }
 

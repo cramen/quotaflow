@@ -74,6 +74,17 @@ public class RedisChainBenchmark {
         BucketIdentity parent = new BucketIdentity(domain, "provider", io.quotaflow.core.Scope.GLOBAL, "shared");
         store.registerPolicies(List.of(PolicyBinding.of(parent, algorithm),
                 new PolicyBinding(domain, "tenant", io.quotaflow.core.Scope.TENANT, algorithm))).toCompletableFuture().join();
+        var cohort = io.quotaflow.core.store.RecoveryCohort.single();
+        var adminClient = RedisClientFactory.createClient(url, Duration.ofSeconds(5));
+        try (var connection = adminClient.connect()) {
+            var controller = new RedisRecoveryController(connection, Duration.ofSeconds(5));
+            controller.provisionCohort(namespace, cohort, "initial", true, true).toCompletableFuture().join();
+            controller.provisionDomain(domain, cohort, "initial", "a".repeat(64), true, true).toCompletableFuture().join();
+            var session = controller.enroll(namespace, cohort, "single", java.util.UUID.randomUUID().toString()).toCompletableFuture().join();
+            var gather = controller.attach(domain, session).toCompletableFuture().join().context();
+            var drain = controller.join(gather).toCompletableFuture().join().context();
+            store.bindRecoveryContext(controller.ready(drain).toCompletableFuture().join().context());
+        } finally { adminClient.shutdown(); }
         for (int i = 0; i < CHAIN_POOL; i++) {
             twoLevelChains.add(List.of(
                     new LevelRequest(parent, limit, algorithm, 1),

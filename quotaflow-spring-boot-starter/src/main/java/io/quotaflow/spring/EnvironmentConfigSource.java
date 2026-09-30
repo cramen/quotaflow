@@ -14,9 +14,9 @@ import org.springframework.core.env.PropertySource;
  * reload re-reads the environment, so replaced property sources (for example a
  * refreshed Spring Cloud Config) take effect through the standard pipeline.
  *
- * <p>Only {@code quotaflow.policies.*} and {@code quotaflow.defaults.*} keys
- * enter the payload — the parser rejects anything else in the namespace, so
- * Spring-only tuning keys ({@code quotaflow.redis.*} and friends) are filtered
+ * <p>Policy/default keys and immutable accounting settings enter the payload.
+ * The distributed endpoint is retained for startup-target comparison, with its
+ * credentials fingerprinted by the parser. Other Spring wiring keys are filtered
  * out. Property names after the policy id are normalized to the kebab-case the
  * parser expects, so YAML-authored camelCase keys (for example
  * {@code refillPeriod}) reload identically to kebab-case ones; the policy id
@@ -68,6 +68,9 @@ final class EnvironmentConfigSource implements ConfigSource {
             return ConfigurationParser.DEFAULTS_PREFIX
                     + toKebabCase(key.substring(ConfigurationParser.DEFAULTS_PREFIX.length()));
         }
+        if (key.equals(ConfigurationParser.NAMESPACE_KEY) || key.equals(ConfigurationParser.ENDPOINT_KEY)) return key;
+        if (key.startsWith(ConfigurationParser.RECOVERY_PREFIX)) return ConfigurationParser.RECOVERY_PREFIX
+                + toKebabCase(key.substring(ConfigurationParser.RECOVERY_PREFIX.length()));
         return null;
     }
 

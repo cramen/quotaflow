@@ -29,93 +29,35 @@ class MicrometerDegradationListenerTest {
     private static final Limit LIMIT = new Limit(100, 100, Duration.ofSeconds(1));
     private static final String KEY = "policy:global:shared";
 
-    /** Primary store whose health the test flips to simulate an outage. */
-    private static final class ControllablePrimary implements BatchRateLimitStore {
-        private final io.quotaflow.core.store.LocalPolicyBindings policyBindings =
-                new io.quotaflow.core.store.LocalPolicyBindings();
-
-        @Override
-        public java.util.concurrent.CompletionStage<Void> registerPolicies(
-                java.util.List<io.quotaflow.core.store.PolicyBinding> bindings) {
-            policyBindings.register(bindings);
-            return java.util.concurrent.CompletableFuture.completedFuture(null);
-        }
-
-        private volatile boolean healthy = true;
-
-        void fail() {
-            healthy = false;
-        }
-
-        void heal() {
-            healthy = true;
-        }
-
-        @Override
-        public StoreResult tryAcquire(BucketIdentity storageKey, Limit limit, Algorithm algorithm, long weight) {
-            if (!healthy) {
-                throw new RuntimeException("primary store unavailable");
-            }
-            return StoreResult.acquired(limit.capacity() - weight);
-        }
-
-        @Override
-        public CompletionStage<StoreResult> tryAcquireAsync(
-                BucketIdentity storageKey, Limit limit, Algorithm algorithm, long weight) {
-            return CompletableFuture.completedFuture(tryAcquire(storageKey, limit, algorithm, weight));
-        }
-
-        @Override
-        public CompletionStage<ChainResult> tryAcquireAll(List<LevelRequest> chain) {
-            if (!healthy) {
-                throw new RuntimeException("primary store unavailable");
-            }
-            return CompletableFuture.completedFuture(ChainResult.acquired(chain.size() - 1, 50));
+    @Test
+    void outageAndRecoveryMoveTheGaugeAndCountFallbackDecisions() throws Exception {
+        var policies = io.quotaflow.core.PolicySet.compile(List.of(io.quotaflow.core.RateLimitPolicy.builder("policy")
+                .scope(io.quotaflow.core.Scope.GLOBAL).limit(LIMIT).build()));
+        var primary = new io.quotaflow.testing.RecoveryPrimaryFixture(policies);
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        var listener = new MicrometerDegradationListener(registry);
+        var settings = new io.quotaflow.fallback.RecoverySettings("default", "test", "single",
+                io.quotaflow.core.store.RecoveryCohort.single(), 100, 100, Duration.ofMillis(10), Duration.ofSeconds(1));
+        try (var store = new FallbackRateLimitStore(primary, settings, List.of(listener))) {
+            var flow = io.quotaflow.core.DefaultQuotaFlow.builder(policies, store).build();
+            await(() -> degraded(registry) == 0);
+            flow.tryAcquire("policy", io.quotaflow.core.RateLimitContext.empty());
+            assertEquals(0, fallbackDecisions(registry));
+            primary.available = false;
+            flow.tryAcquire("policy", io.quotaflow.core.RateLimitContext.empty());
+            assertEquals(1, degraded(registry)); assertEquals(1, fallbackDecisions(registry));
+            flow.tryAcquire("policy", io.quotaflow.core.RateLimitContext.empty());
+            assertEquals(2, fallbackDecisions(registry));
+            primary.available = true;
+            await(() -> degraded(registry) == 0);
+            assertEquals(DegradationState.CLOSED, store.state());
+            assertEquals(2, fallbackDecisions(registry), "control probes are not business decisions");
         }
     }
-
-    @Test
-    void outageAndRecoveryMoveTheGaugeAndCountFallbackDecisions() {
-        SimpleMeterRegistry registry = new SimpleMeterRegistry();
-        MicrometerDegradationListener listener = new MicrometerDegradationListener(registry);
-        ControllablePrimary primary = new ControllablePrimary();
-        AtomicLong clock = new AtomicLong();
-        FallbackConfig config =
-                new FallbackConfig(1, Duration.ofMillis(100), Duration.ofSeconds(1), 2, 100);
-        FallbackRateLimitStore store = new FallbackRateLimitStore(
-                primary,
-                new LocalRateLimitStore(),
-                StateSeeder.noOp(),
-                config,
-                List.of(listener),
-                clock::get,
-                key -> "global");
-
-        assertEquals(0.0, degraded(registry));
-
-        // healthy: served by the primary, no fallback decisions
-        store.tryAcquire(key(KEY), LIMIT, Algorithm.TOKEN_BUCKET, 1);
-        assertEquals(0.0, degraded(registry));
-        assertEquals(0.0, fallbackDecisions(registry));
-
-        // outage: the threshold of 1 trips the breaker on the first failure
-        primary.fail();
-        store.tryAcquire(key(KEY), LIMIT, Algorithm.TOKEN_BUCKET, 1);
-        assertEquals(DegradationState.OPEN, store.state());
-        assertEquals(1.0, degraded(registry));
-        assertEquals(1.0, fallbackDecisions(registry));
-
-        store.tryAcquire(key(KEY), LIMIT, Algorithm.TOKEN_BUCKET, 1);
-        assertEquals(2.0, fallbackDecisions(registry));
-
-        // recovery: after the open duration the next request probes the now
-        // healthy primary, seeding succeeds and the breaker closes
-        primary.heal();
-        clock.addAndGet(Duration.ofMillis(150).toNanos());
-        store.tryAcquire(key(KEY), LIMIT, Algorithm.TOKEN_BUCKET, 1);
-        assertEquals(DegradationState.CLOSED, store.state());
-        assertEquals(0.0, degraded(registry));
-        assertEquals(2.0, fallbackDecisions(registry));
+    private static void await(java.util.function.BooleanSupplier condition) throws Exception {
+        long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+        while (!condition.getAsBoolean() && System.nanoTime() < deadline) Thread.sleep(5);
+        org.junit.jupiter.api.Assertions.assertTrue(condition.getAsBoolean());
     }
 
     private static double degraded(SimpleMeterRegistry registry) {

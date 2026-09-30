@@ -212,17 +212,55 @@ class ClusterTopologyTckTest {
                         new Limit(3, 1, Duration.ofSeconds(10)), Algorithm.TOKEN_BUCKET, 1));
     }
 
+    @Test void fixedCohortRecoveryRunsThroughSameSlotControllersOnCluster() throws Exception {
+        String namespace = "cluster-recovery-" + UUID.randomUUID();
+        var domain = new io.quotaflow.core.store.QuotaDomain(namespace, "root");
+        var cohort = new io.quotaflow.core.store.RecoveryCohort(List.of("a", "b"));
+        var policies = io.quotaflow.core.PolicySet.compile(List.of(io.quotaflow.core.RateLimitPolicy.builder("root")
+                .scope(io.quotaflow.core.Scope.GLOBAL).limit(new Limit(10, 10, Duration.ofSeconds(1))).build()));
+        var safe = RedisClusterClient.create(RedisURI.create("127.0.0.1", FIRST_PORT));
+        var transport = io.lettuce.core.cluster.ClusterClientOptions.builder();
+        transport.disconnectedBehavior(io.lettuce.core.ClientOptions.DisconnectedBehavior.REJECT_COMMANDS);
+        transport.requestQueueSize(4096); transport.replayFilter(command -> false);
+        transport.timeoutOptions(io.lettuce.core.TimeoutOptions.enabled(Duration.ofSeconds(2)));
+        safe.setOptions(transport.build());
+        try (var ca = safe.connect(); var cb = safe.connect(); var sa = new RedisRateLimitStore(ca, RedisStoreConfig.defaults());
+             var sb = new RedisRateLimitStore(cb, RedisStoreConfig.defaults())) {
+            try (var administrative = clusterClient.connect(); var administrativeStore = new RedisRateLimitStore(administrative, RedisStoreConfig.defaults())) {
+                new io.quotaflow.store.redis.RedisNamespaceAdmin(administrative).provisionFresh(namespace, true);
+                var bindings = List.of(new io.quotaflow.core.store.PolicyBinding(domain, "root", io.quotaflow.core.Scope.GLOBAL, Algorithm.TOKEN_BUCKET));
+                administrativeStore.registerPolicies(bindings).toCompletableFuture().join();
+                var admin = new io.quotaflow.store.redis.RedisRecoveryController(administrative, Duration.ofSeconds(2));
+                admin.provisionCohort(namespace, cohort, "initial", true, true).toCompletableFuture().join();
+                admin.provisionDomain(domain, cohort, "initial", policies.recoveryFingerprint("root"), true, true).toCompletableFuture().join();
+            }
+            try (var a = new io.quotaflow.fallback.FallbackRateLimitStore(sa.recoveryPrimary(namespace, Duration.ofSeconds(2), true),
+                    new io.quotaflow.fallback.RecoverySettings(namespace, "test", "a", cohort, 100, 100, Duration.ofMillis(20), Duration.ofSeconds(2)), List.of());
+                 var b = new io.quotaflow.fallback.FallbackRateLimitStore(sb.recoveryPrimary(namespace, Duration.ofSeconds(2), true),
+                         new io.quotaflow.fallback.RecoverySettings(namespace, "test", "b", cohort, 100, 100, Duration.ofMillis(20), Duration.ofSeconds(2)), List.of())) {
+                var flow = io.quotaflow.core.DefaultQuotaFlow.builder(policies, a).namespace(namespace).build();
+                io.quotaflow.core.DefaultQuotaFlow.builder(policies, b).namespace(namespace).build();
+                long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+                while ((a.state() != io.quotaflow.fallback.DegradationState.CLOSED || b.state() != io.quotaflow.fallback.DegradationState.CLOSED)
+                        && System.nanoTime() < deadline) Thread.sleep(20);
+                assertEquals(io.quotaflow.fallback.DegradationState.CLOSED, a.state());
+                assertEquals(io.quotaflow.fallback.DegradationState.CLOSED, b.state());
+                assertTrue(flow.tryAcquire("root", io.quotaflow.core.RateLimitContext.empty()).isAllowed());
+            }
+        } finally { safe.shutdown(); }
+    }
+
     @Test
     void numericContractOnCluster() {
         try (var connection = clusterClient.connect();
-                var store = new RedisRateLimitStore(connection, RedisStoreConfig.defaults())) {
+                var store = new io.quotaflow.testing.RecoveryStoreFixture(connection, RedisStoreConfig.defaults())) {
             NumericConformance.verify(store);
         }
     }
 
     @Test
     void sharedWeightedHierarchyAndDirectParentsOnCluster() throws Exception {
-        try (var connection = clusterClient.connect(); var store = new RedisRateLimitStore(connection,
+        try (var connection = clusterClient.connect(); var store = new io.quotaflow.testing.RecoveryStoreFixture(connection,
                 new RedisStoreConfig(Duration.ofSeconds(2), Duration.ofSeconds(4)))) {
             for (Algorithm algorithm : Algorithm.values()) HierarchyConformance.verify(store, algorithm);
         }
@@ -276,7 +314,7 @@ class ClusterTopologyTckTest {
         List<ChainResult> clusterDecisions;
         try (StatefulRedisClusterConnection<String, String> connection = clusterClient.connect();
                 RedisRateLimitStore clusterStore =
-                        new RedisRateLimitStore(connection, RedisStoreConfig.defaults())) {
+                        new io.quotaflow.testing.RecoveryStoreFixture(connection, RedisStoreConfig.defaults())) {
             clusterDecisions = scriptedSequence(clusterStore, chain);
         }
 
@@ -284,7 +322,7 @@ class ClusterTopologyTckTest {
         try (RedisClient standaloneClient = RedisClient.create(uri);
                 StatefulRedisConnection<String, String> connection = standaloneClient.connect();
                 RedisRateLimitStore standaloneStore =
-                        new RedisRateLimitStore(connection, RedisStoreConfig.defaults())) {
+                        new io.quotaflow.testing.RecoveryStoreFixture(connection, RedisStoreConfig.defaults())) {
             List<ChainResult> standaloneDecisions = scriptedSequence(standaloneStore, chain(run));
             assertEquals(standaloneDecisions, clusterDecisions,
                     "cluster decisions must equal standalone decisions step by step");
@@ -315,7 +353,7 @@ class ClusterTopologyTckTest {
     @Test
     void singleKeyAlgorithmsWorkOnCluster() {
         try (StatefulRedisClusterConnection<String, String> connection = clusterClient.connect();
-                RedisRateLimitStore store = new RedisRateLimitStore(connection, RedisStoreConfig.defaults())) {
+                RedisRateLimitStore store = new io.quotaflow.testing.RecoveryStoreFixture(connection, RedisStoreConfig.defaults())) {
             Limit limit = new Limit(1, 1, Duration.ofSeconds(10));
             for (Algorithm algorithm : Algorithm.values()) {
                 String key = "cluster-" + algorithm.name().toLowerCase() + ":user:" + '-' + UUID.randomUUID();

@@ -31,6 +31,7 @@ extra["dependencyAuditAllowlist"] = listOf(
 )
 
 dependencies {
+    testImplementation(testFixtures(project(":quotaflow-store-redis")))
     implementation(project(":quotaflow-core"))
     implementation(project(":quotaflow-store-redis"))
     implementation(project(":quotaflow-fallback"))
@@ -48,6 +49,7 @@ dependencies {
 
 tasks.withType<Test> {
     useJUnitPlatform()
+    systemProperty("quotaflow.tck.classpath", sourceSets["test"].runtimeClasspath.asPath)
 }
 
 // --- Soak profile (D5): NOT part of check — on-demand and nightly only.
