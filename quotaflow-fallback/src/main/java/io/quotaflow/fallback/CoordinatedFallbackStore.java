@@ -621,7 +621,7 @@ public class CoordinatedFallbackStore implements BatchRateLimitStore, RecoveryCo
         Route route = domain.route.get();
         String fingerprint = cfg.source.domains().contains(domain.identity) ? cfg.source.fingerprint(domain.identity) : null;
         if (fingerprint == null) return CompletableFuture.completedFuture(fallback(cfg, requests, ChainResult.rejected(0, 0, 0)));
-        if (route.target == null || route.revision != cfg.revision)
+        if (route.target == null || route.revision != cfg.revision || !route.target.fingerprint().equals(fingerprint))
             return CompletableFuture.completedFuture(fallback(cfg, requests, pending(domain)));
         if (domain.blockedTarget != null && domain.blockedTarget.equals(route.target.configuration(route.revision))) {
             quiesce(domain, route); return CompletableFuture.completedFuture(fallback(cfg, requests, pending(domain)));

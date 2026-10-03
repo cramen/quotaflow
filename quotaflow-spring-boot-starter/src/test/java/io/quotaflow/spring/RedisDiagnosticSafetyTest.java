@@ -42,8 +42,16 @@ class RedisDiagnosticSafetyTest {
             var protocol=(Logger)LoggerFactory.getLogger("io.lettuce.core.protocol");var previousProtocol=protocol.getLevel();protocol.setLevel(Level.INFO);
         var events=new ListAppender<ILoggingEvent>();events.start();logger.addAppender(events);logger.setLevel(Level.ALL);
             try {
-                var client=io.quotaflow.store.redis.RedisClientFactory.createClient("redis://"+username+":"+password+"@"+endpoint+"?clientName="+clientName,Duration.ofSeconds(1));
-                try(var connection=client.connect()) {assertEquals("PONG",connection.sync().ping());}
+                var client=io.quotaflow.store.redis.RedisClientFactory.createClient("redis://"+username+":"+password+"@"+endpoint+"/3?clientName="+clientName,Duration.ofSeconds(1));
+                try(var connection=client.connect()) {
+                    assertEquals("PONG",connection.sync().ping());
+                    assertEquals(clientName,connection.sync().clientGetname());
+                    assertEquals("OK",connection.sync().set("verification-database", "three"));
+                    connection.sync().select(0);
+                    assertNull(connection.sync().get("verification-database"));
+                    connection.sync().select(3);
+                    assertEquals("three",connection.sync().get("verification-database"));
+                }
                 finally {client.shutdown();}
                 var text=new StringBuilder();
                 for(var event:events.list) {

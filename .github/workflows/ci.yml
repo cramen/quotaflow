@@ -24,45 +24,55 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: ${{ matrix.jdk }}
+          java-version: |
+            17
+            ${{ matrix.jdk }}
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
+
+      - name: Verify build negative controls
+        run: |
+          python3 scripts/test_build_verification.py
+          python3 scripts/test_performance_bundle.py
+          python3 scripts/test_release_evidence.py
+          python3 scripts/test_evidence_collection.py
 
       - name: Build, test, and audit dependencies
-        run: ./gradlew build dependencyAudit
+        run: ./gradlew build dependencyAudit -PtestJdk=${{ matrix.jdk }}
 
-  # Diagnostic measurements; controlled release comparison is tracked separately.
-  benchmarks:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Validate Gradle wrapper
-        uses: gradle/actions/wrapper-validation@v4
-
-      - name: Set up JDK 21
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 21
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Verify benchmark evidence checks
-        run: python3 scripts/test_benchmark_verification.py
-
-      - name: Run benchmark gates
-        run: ./gradlew :quotaflow-core:benchmarkGate :quotaflow-store-redis:benchmarkGate
-
-      - name: Retain benchmark evidence
+      - name: Retain test and worker evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-measurements
-          path: '**/build/reports/jmh/*.json'
+          name: jdk-${{ matrix.jdk }}-verification
+          path: |
+            **/build/reports/runtime/**
+            **/build/test-results/**
+            **/build/reports/jacoco/**
+            **/build/reports/virtual-threads/**
+            **/build/reports/generated/**
+
+  correctness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: gradle/actions/wrapper-validation@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Verify threshold negative controls
+        run: python3 scripts/test_quality_thresholds.py
+      - name: Run independent mutation gates
+        run: ./gradlew correctnessGate -PtestJdk=17
+      - name: Retain mutation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: correctness-mutations
+          path: '**/build/reports/pitest/**'
 
   # Compiles the minimal limiter workload (local decisions + Lua-backed chain
   # evaluation) to a native image and runs it against a real Redis, proving
@@ -100,3 +110,38 @@ jobs:
         run: ./gradlew :quotaflow-native-smoke:nativeRun
         env:
           REDIS_URL: redis://localhost:6379
+
+  native-spring:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: [servlet, reactive]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: gradle/actions/wrapper-validation@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          java-version: '25'
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Stage candidate locally
+        run: ./gradlew publishAllPublicationsToVerificationRepository -PverificationRepository=build/consumer-repository
+      - name: Compile and execute native Spring assertions
+        run: |
+          python3 scripts/run_native_verification.py --graal-home "$JAVA_HOME" \
+            --repository build/consumer-repository --redis-url redis://localhost:6379 \
+            --fixtures ${{ matrix.stack }} --output build/reports/native-spring
+      - name: Retain native diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-spring-${{ matrix.stack }}
+          path: |
+            build/reports/native-spring/**
+            verification/native/build/native/**

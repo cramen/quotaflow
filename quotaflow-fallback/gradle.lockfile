@@ -1,0 +1,37 @@
+# This is a Gradle generated file for dependency locking.
+# Manual edits can break the build and are not advised.
+# This file is expected to be part of source control.
+antlr:antlr:2.7.7=pitest
+net.sf.jopt-simple:jopt-simple:4.9=pitest
+net.sf.jopt-simple:jopt-simple:5.0.4=jmh,jmhCompileClasspath,jmhRuntimeClasspath
+org.antlr:stringtemplate:3.2.1=pitest
+org.apache.commons:commons-lang3:3.18.0=pitest
+org.apache.commons:commons-math3:3.2=jmh,jmhCompileClasspath,jmhRuntimeClasspath
+org.apache.commons:commons-text:1.14.0=pitest
+org.apiguardian:apiguardian-api:1.1.2=testCompileClasspath
+org.junit.jupiter:junit-jupiter-api:5.11.4=jmhRuntimeClasspath,testCompileClasspath,testRuntimeClasspath
+org.junit.jupiter:junit-jupiter-engine:5.11.4=jmhRuntimeClasspath,testRuntimeClasspath
+org.junit.jupiter:junit-jupiter-params:5.11.4=jmhRuntimeClasspath,testCompileClasspath,testRuntimeClasspath
+org.junit.jupiter:junit-jupiter:5.11.4=jmhRuntimeClasspath,testCompileClasspath,testRuntimeClasspath
+org.junit.platform:junit-platform-commons:1.11.4=jmhRuntimeClasspath,testCompileClasspath,testRuntimeClasspath
+org.junit.platform:junit-platform-engine:1.11.4=jmhRuntimeClasspath,testCompileClasspath,testRuntimeClasspath
+org.junit.platform:junit-platform-launcher:1.11.4=jmhRuntimeClasspath,testCompileClasspath,testRuntimeClasspath
+org.junit:junit-bom:5.11.4=jmhRuntimeClasspath,testCompileClasspath,testRuntimeClasspath
+org.openjdk.jmh:jmh-core:1.36=jmh,jmhCompileClasspath,jmhRuntimeClasspath
+org.openjdk.jmh:jmh-generator-asm:1.36=jmh,jmhCompileClasspath,jmhRuntimeClasspath
+org.openjdk.jmh:jmh-generator-bytecode:1.36=jmh,jmhCompileClasspath,jmhRuntimeClasspath
+org.openjdk.jmh:jmh-generator-reflection:1.36=jmh,jmhCompileClasspath,jmhRuntimeClasspath
+org.opentest4j:opentest4j:1.3.0=jmhRuntimeClasspath,testCompileClasspath,testRuntimeClasspath
+org.ow2.asm:asm-analysis:9.9.1=pitest
+org.ow2.asm:asm-commons:9.9.1=pitest
+org.ow2.asm:asm-tree:9.9.1=pitest
+org.ow2.asm:asm-util:9.9.1=pitest
+org.ow2.asm:asm:9.0=jmh,jmhCompileClasspath,jmhRuntimeClasspath
+org.ow2.asm:asm:9.9.1=pitest
+org.pitest:pitest-command-line:1.22.1=pitest
+org.pitest:pitest-entry:1.22.1=pitest
+org.pitest:pitest-html-report:1.22.1=pitest
+org.pitest:pitest-junit5-plugin:1.2.1=jmhRuntimeClasspath,testCompileClasspath,testRuntimeClasspath
+org.pitest:pitest:1.22.1=pitest
+org.slf4j:slf4j-api:2.0.17=compileClasspath,jmhCompileClasspath,jmhRuntimeClasspath,runtimeClasspath,testCompileClasspath,testFixturesCompileClasspath,testFixturesRuntimeClasspath,testRuntimeClasspath
+empty=annotationProcessor,cyclonedxBom,jmhAnnotationProcessor,testAnnotationProcessor,testFixturesAnnotationProcessor

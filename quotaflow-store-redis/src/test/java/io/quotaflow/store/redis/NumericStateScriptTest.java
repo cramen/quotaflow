@@ -22,9 +22,12 @@ class NumericStateScriptTest extends RedisContainerSupport {
     private static String script(Algorithm algorithm) {
         String source = LuaScript.load(algorithm == Algorithm.GCRA ? "/lua/gcra.lua" : "/lua/token_bucket.lua").source();
         assertTrue(source.contains("local t = redis.call('TIME')"));
-        // Only the time provider changes: every arithmetic/codec branch is production code.
+        // Arithmetic and codecs remain production code. Wall-clock TTL expiry cannot
+        // advance independently of this synthetic clock between model operations.
         return "local testMicros = table.remove(ARGV); local testSeconds = table.remove(ARGV);\n"
-                + source.replace("local t = redis.call('TIME')", "local t = {testSeconds, testMicros}");
+                + "local function run()\n"
+                + source.replace("local t = redis.call('TIME')", "local t = {testSeconds, testMicros}")
+                + "\nend; local result = run(); redis.call('PERSIST', KEYS[1]); return result";
     }
     private static List<Object> evaluate(StatefulRedisConnection<String,String> connection, String source,
                                          String key, String[] params, long sec, long micros) {

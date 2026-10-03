@@ -50,7 +50,25 @@ class ClusterTopologyTckTest {
 
     private static final int FIRST_PORT = 17000;
     private static final int NODE_COUNT = 6;
-    private static final String CLUSTER_IMAGE = "grokzen/redis-cluster:6.2.14";
+    private static final boolean VALKEY = Boolean.getBoolean("quotaflow.topology.valkey");
+    private static final String CLUSTER_IMAGE = VALKEY ? "valkey/valkey:8.0-alpine" : "redis:6.2.24-alpine";
+    private static final String CLI = VALKEY ? "valkey-cli" : "redis-cli";
+
+    private static String clusterCommand() {
+        String server = VALKEY ? "valkey-server" : "redis-server";
+        StringBuilder script = new StringBuilder("set -e\n");
+        for (int port = FIRST_PORT; port < FIRST_PORT + NODE_COUNT; port++) {
+            script.append("mkdir -p /tmp/node-").append(port).append("\n")
+                    .append(server).append(" --port ").append(port)
+                    .append(" --bind 0.0.0.0 --protected-mode no --cluster-enabled yes --cluster-node-timeout 30000")
+                    .append(" --cluster-announce-ip 127.0.0.1 --dir /tmp/node-").append(port)
+                    .append(" --cluster-config-file nodes.conf --daemonize yes\n");
+        }
+        script.append(CLI).append(" --cluster create");
+        for (int port = FIRST_PORT; port < FIRST_PORT + NODE_COUNT; port++) script.append(" 127.0.0.1:").append(port);
+        script.append(" --cluster-replicas 1 --cluster-yes\necho 'CLUSTER READY'\nexec tail -f /dev/null\n");
+        return script.toString();
+    }
 
     private static GenericContainer<?> cluster;
     private static GenericContainer<?> standalone;
@@ -70,7 +88,7 @@ class ClusterTopologyTckTest {
         removeStaleClusterContainers();
         cluster = startWithPortRetry(3);
 
-        standalone = new GenericContainer<>(DockerImageName.parse("redis:6.2-alpine"))
+        standalone = new GenericContainer<>(DockerImageName.parse(CLUSTER_IMAGE))
                 .withExposedPorts(6379);
         standalone.start();
 
@@ -90,6 +108,23 @@ class ClusterTopologyTckTest {
         } finally { provisioning.shutdown(); }
     }
 
+    @org.junit.jupiter.api.BeforeEach
+    void waitForAnAuthoritativeTopologyBeforeEachScenario() throws Exception {
+        long deadline = System.nanoTime() + Duration.ofSeconds(15).toNanos();
+        RuntimeException last = null;
+        do {
+            clusterClient.reloadPartitions();
+            try (var connection = clusterClient.connect()) {
+                assertEquals(3, new io.quotaflow.store.redis.RedisNamespaceAdmin(connection).primaryIds().size());
+                return;
+            } catch (io.quotaflow.core.PolicyConfigurationException | io.lettuce.core.RedisException transientTopology) {
+                last = transientTopology;
+            }
+            Thread.sleep(100);
+        } while (System.nanoTime() < deadline);
+        throw new IllegalStateException("cluster did not converge to an administrable topology", last);
+    }
+
     private static GenericContainer<?> startWithPortRetry(int attempts) {
         ContainerLaunchException lastFailure = null;
         for (int attempt = 0; attempt < attempts; attempt++) {
@@ -99,8 +134,9 @@ class ClusterTopologyTckTest {
             }
             GenericContainer<?> candidate =
                     new GenericContainer<>(DockerImageName.parse(CLUSTER_IMAGE))
-                            .withEnv("IP", "127.0.0.1")
-                            .withEnv("INITIAL_PORT", String.valueOf(FIRST_PORT));
+                            .withLabel("quotaflow.test.topology", "cluster")
+                            .withCommand("sh", "-c", clusterCommand())
+                            .waitingFor(org.testcontainers.containers.wait.strategy.Wait.forLogMessage(".*CLUSTER READY.*", 1));
             candidate.setPortBindings(portBindings);
             try {
                 candidate.start();
@@ -123,7 +159,7 @@ class ClusterTopologyTckTest {
         DockerClientFactory.instance().client()
                 .listContainersCmd()
                 .withShowAll(true)
-                .withAncestorFilter(List.of(CLUSTER_IMAGE))
+                .withLabelFilter(java.util.Map.of("quotaflow.test.topology", "cluster"))
                 .exec()
                 .forEach(stale -> DockerClientFactory.instance().client()
                         .removeContainerCmd(stale.getId())
@@ -133,9 +169,9 @@ class ClusterTopologyTckTest {
 
     @AfterAll
     static void stopCluster() {
-        if (clusterClient != null) {
-            clusterClient.shutdown();
-        }
+        if (clusterClient != null) clusterClient.shutdown();
+        if (cluster != null) cluster.stop();
+        if (standalone != null) standalone.stop();
     }
 
     private static void awaitClusterReady(Duration deadline) {
@@ -248,6 +284,62 @@ class ClusterTopologyTckTest {
                 assertTrue(flow.tryAcquire("root", io.quotaflow.core.RateLimitContext.empty()).isAllowed());
             }
         } finally { safe.shutdown(); }
+    }
+
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.EnumSource(Algorithm.class)
+    void slotMigrationRedirectionAndReconnectNeverDuplicateTheSharedBudget(Algorithm algorithm) throws Exception {
+        clusterClient.reloadPartitions();
+        String namespace = "moved-" + UUID.randomUUID();
+        try (var connection = clusterClient.connect();
+             var store = new io.quotaflow.testing.RecoveryStoreFixture(connection, RedisStoreConfig.defaults())) {
+            new io.quotaflow.store.redis.RedisNamespaceAdmin(connection).provisionFresh(namespace, true);
+            var domain = new io.quotaflow.core.store.QuotaDomain(namespace, "parent");
+            var parent = new BucketIdentity(domain, "parent", io.quotaflow.core.Scope.GLOBAL, "shared");
+            var limit = new Limit(3, 1, Duration.ofHours(1));
+            var chain = List.of(new LevelRequest(parent, limit, algorithm, 1),
+                    new LevelRequest(new BucketIdentity(domain, "child", io.quotaflow.core.Scope.USER, "one"), limit, algorithm, 1));
+            assertTrue(store.tryAcquireAll(chain).toCompletableFuture().join().acquired());
+            int slot = io.lettuce.core.cluster.SlotHash.getSlot(RedisKeyScheme.defaults().singleKey(parent));
+            var source = connection.getPartitions().getPartitionBySlot(slot);
+            var target = connection.getPartitions().stream().filter(node -> node.is(io.lettuce.core.cluster.models.partitions.RedisClusterNode.NodeFlag.MASTER)
+                    && !node.getNodeId().equals(source.getNodeId())).findFirst().orElseThrow();
+            var from = connection.getConnection(source.getNodeId()).sync();
+            var to = connection.getConnection(target.getNodeId()).sync();
+            assertEquals(source.getNodeId(), cluster.execInContainer(CLI, "-p", Integer.toString(source.getUri().getPort()), "CLUSTER", "MYID").getStdout().trim());
+            assertEquals(target.getNodeId(), cluster.execInContainer(CLI, "-p", Integer.toString(target.getUri().getPort()), "CLUSTER", "MYID").getStdout().trim());
+            assertEquals("OK", cluster.execInContainer(CLI, "-p", Integer.toString(target.getUri().getPort()),
+                    "CLUSTER", "SETSLOT", Integer.toString(slot), "IMPORTING", source.getNodeId()).getStdout().trim());
+            assertEquals("OK", cluster.execInContainer(CLI, "-p", Integer.toString(source.getUri().getPort()),
+                    "CLUSTER", "SETSLOT", Integer.toString(slot), "MIGRATING", target.getNodeId()).getStdout().trim());
+            var keys = from.clusterGetKeysInSlot(slot, 1000);
+            assertFalse(keys.isEmpty());
+            var migrate = new ArrayList<String>(List.of(CLI, "-p", Integer.toString(source.getUri().getPort()),
+                    "MIGRATE", "127.0.0.1", Integer.toString(target.getUri().getPort()), "", "0", "5000", "KEYS"));
+            migrate.addAll(keys);
+            var moved = cluster.execInContainer(migrate.toArray(String[]::new));
+            assertEquals("OK", moved.getStdout().trim());
+            to.scriptFlush();
+            // Slot still belongs to the source: this invocation must follow ASK and reload Lua.
+            assertTrue(store.tryAcquireAll(chain).toCompletableFuture().join().acquired());
+            for (var node : connection.getPartitions()) if (node.is(io.lettuce.core.cluster.models.partitions.RedisClusterNode.NodeFlag.MASTER))
+                assertEquals("OK", cluster.execInContainer(CLI, "-p", Integer.toString(node.getUri().getPort()),
+                        "CLUSTER", "SETSLOT", Integer.toString(slot), "NODE", target.getNodeId()).getStdout().trim());
+            to.scriptFlush();
+            // Keep the client's old slot map: the next invocation must handle MOVED.
+            assertTrue(store.tryAcquireAll(chain).toCompletableFuture().join().acquired());
+            var killed = cluster.execInContainer(CLI, "-p", Integer.toString(target.getUri().getPort()),
+                    "CLIENT", "KILL", "TYPE", "normal", "SKIPME", "yes");
+            assertEquals(0, killed.getExitCode());
+            long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+            while (System.nanoTime() < deadline) {
+                try { if ("PONG".equals(connection.getConnection(target.getNodeId()).sync().ping())) break; }
+                catch (io.lettuce.core.RedisException reconnecting) { Thread.sleep(50); }
+            }
+            assertFalse(store.tryAcquire(parent, limit, algorithm, 1).acquired());
+            assertFalse(store.tryAcquireAll(chain).toCompletableFuture().join().acquired());
+        } finally { clusterClient.reloadPartitions(); }
     }
 
     @Test

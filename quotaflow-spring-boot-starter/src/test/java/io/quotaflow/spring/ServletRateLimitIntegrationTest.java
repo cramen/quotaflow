@@ -66,7 +66,8 @@ class ServletRateLimitIntegrationTest {
                 .andExpect(jsonPath("$.detail").value(containsString("user-api")))
                 .andExpect(jsonPath("$.detail").value(containsString("user")))
                 // the raw limit key must never leak into the response
-                .andExpect(jsonPath("$.detail").value(not(containsString("frank"))));
+                .andExpect(jsonPath("$.instance").value(org.hamcrest.Matchers.startsWith("urn:uuid:")))
+                .andExpect(content().string(not(containsString("frank"))));
     }
 
     @Test

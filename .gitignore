@@ -24,3 +24,7 @@ out/
 
 # Logs
 *.log
+
+# Python verification helpers
+__pycache__/
+*.pyc

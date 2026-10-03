@@ -19,26 +19,26 @@ final class ObservationDispatcher {
         waits.forEach(value -> flags.merge(value, 2, (a,b)->a|b));
         flags.forEach((listener, kind) -> channels.add(new Channel(new ObservationSession() {
             @Override public void onDecision(long generation, Decision decision, String group) {
-                if ((kind & 1) != 0) ((DecisionListener)listener).onDecision(decision, group);
+                ((DecisionListener)listener).onDecision(decision, group);
             }
             @Override public void onQueued(long generation, String policy, String group) {
-                if ((kind & 2) != 0) ((WaitListener)listener).onQueued(policy, group);
+                ((WaitListener)listener).onQueued(policy, group);
             }
-        }, false, capacity, timeout)));
+        }, kind, capacity, timeout)));
         for (ObservationListener observer : observers) {
-            try { channels.add(new Channel(Objects.requireNonNull(observer.open(initial), "observation session"), true, capacity, timeout)); }
+            try { channels.add(new Channel(Objects.requireNonNull(observer.open(initial), "observation session"), 7, capacity, timeout)); }
             catch (RuntimeException failure) { failures.increment(); failed(failure); }
         }
     }
-    void configuration(ObservationConfiguration configuration) { send(true, session -> session.onConfiguration(configuration)); }
-    void budget(BudgetObservation observation) { send(true, session -> session.onBudget(observation)); }
-    void queued(long generation, String policy, String group) { send(false, session -> session.onQueued(generation, policy, group)); }
+    void configuration(ObservationConfiguration configuration) { send(4, session -> session.onConfiguration(configuration)); }
+    void budget(BudgetObservation observation) { send(4, session -> session.onBudget(observation)); }
+    void queued(long generation, String policy, String group) { send(2, session -> session.onQueued(generation, policy, group)); }
     CompletionStage<Void> decision(long generation, Decision decision, String group) {
-        return send(false, session -> session.onDecision(generation, decision, group));
+        return send(1, session -> session.onDecision(generation, decision, group));
     }
-    void retired(long generation) { send(true, session -> session.onRetired(generation)); }
-    private CompletionStage<Void> send(boolean contextualOnly, Consumer<ObservationSession> callback) {
-        return CompletableFuture.allOf(channels.stream().filter(channel -> !contextualOnly || channel.contextual)
+    void retired(long generation) { send(4, session -> session.onRetired(generation)); }
+    private CompletionStage<Void> send(int eventKind, Consumer<ObservationSession> callback) {
+        return CompletableFuture.allOf(channels.stream().filter(channel -> (channel.kinds & eventKind) != 0)
                 .map(channel -> channel.send(callback)).toArray(CompletableFuture[]::new));
     }
     CompletionStage<Void> barrier() {
@@ -51,10 +51,10 @@ final class ObservationDispatcher {
 
     private static final class Channel {
         final ObservationSession session;
-        final boolean contextual;
+        final int kinds;
         final io.quotaflow.core.execution.CallbackDispatcher delivery;
-        Channel(ObservationSession session, boolean contextual, int capacity, Duration timeout) {
-            this.session = session; this.contextual = contextual;
+        Channel(ObservationSession session, int kinds, int capacity, Duration timeout) {
+            this.session = session; this.kinds = kinds;
             delivery = new io.quotaflow.core.execution.CallbackDispatcher(capacity, timeout, session::close);
         }
         CompletableFuture<Void> send(Consumer<ObservationSession> callback) { return delivery.submit(() -> callback.accept(session)); }

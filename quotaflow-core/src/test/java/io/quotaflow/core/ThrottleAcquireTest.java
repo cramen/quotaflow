@@ -287,6 +287,7 @@ class ThrottleAcquireTest {
         assertTrue(first.get(10, TimeUnit.SECONDS).isAllowed());
         assertTrue(second.get(10, TimeUnit.SECONDS).isAllowed());
 
+        flow.flushObservations().toCompletableFuture().get(2, TimeUnit.SECONDS);
         assertEquals(3, events.size(), "one drain event plus one per waiter: " + events);
         assertEquals(List.of("global", "global", "global"), keyGroups);
         List<Decision> waited = events.stream()

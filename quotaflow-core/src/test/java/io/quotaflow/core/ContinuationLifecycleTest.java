@@ -25,7 +25,9 @@ class ContinuationLifecycleTest {
         var call = store.next(); var decision = result.get(2, TimeUnit.SECONDS);
         assertFalse(decision.isAllowed()); assertTrue(decision.retryAfter().isEmpty());
         assertEquals(Duration.ZERO, decision.waitDuration()); assertEquals(0, flow.waitQueueDepth("p"));
-        call.complete(ChainResult.acquired(0, 9)); assertEquals(1, events.get());
+        call.complete(ChainResult.acquired(0, 9));
+        flow.flushObservations().toCompletableFuture().get(2, TimeUnit.SECONDS);
+        assertEquals(1, events.get());
     }
     @Test void blockedListenerCannotStopAnotherDeadlineFromWinning() throws Exception {
         var entered = new CountDownLatch(1); var release = new CountDownLatch(1);
@@ -80,6 +82,7 @@ class ContinuationLifecycleTest {
         assertTrue(cancelled.cancel(true)); assertFalse(signal.isDone());
         signal.complete(null);
         assertTrue(live.get(2,TimeUnit.SECONDS).isAllowed());
+        flow.flushObservations().toCompletableFuture().get(2, TimeUnit.SECONDS);
         assertEquals(List.of("p:global","p:global"),entries); assertEquals(1,events.get());
         assertEquals(3,dispatchCount.get()); assertEquals(0,flow.retainedQueues());
     }

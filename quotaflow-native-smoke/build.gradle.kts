@@ -45,3 +45,7 @@ graalvmNative {
         }
     }
 }
+
+// Keep the workload runnable by selected JVM launchers while native-image still
+// uses the GraalVM compiler that runs the build.
+tasks.withType<JavaCompile>().configureEach { options.release.set(17) }

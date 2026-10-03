@@ -44,6 +44,10 @@ class StaggeredRecoveryEnvelopeTckTest extends TckContainers {
                 setTime(ca, clockKey, time, 1000);
                 assertTrue(trace.ask(fb, 5)); // exact A=5, B=0 guard state before A rejoins
                 onlineA.set(true);
+                // Advance after connectivity changes so a retry backoff captured at the
+                // preceding frozen timestamp can expire. Neither local share earns a
+                // whole extra token during these one-second transitions.
+                setTime(ca, clockKey, time, 1001);
                 String control = RedisKeyScheme.defaults().controlKey(domain);
                 await(() -> "GATHER".equals(ca.sync().hget(control, "phase")) && "1".equals(ca.sync().hget(control, "joined")));
                 var bucket = new BucketIdentity(domain, "quota", Scope.GLOBAL, "global");
@@ -55,12 +59,12 @@ class StaggeredRecoveryEnvelopeTckTest extends TckContainers {
                 assertEquals(5, trace.actual - before);
                 assertFalse(trace.ask(fa, 1), "guard prevents another primary burst while B is local-only");
                 assertNotEquals(DegradationState.CLOSED, a.state());
-                onlineB.set(true); setTime(ca, clockKey, time, 1001);
+                onlineB.set(true); setTime(ca, clockKey, time, 1002);
                 await(() -> a.state() == DegradationState.CLOSED && b.state() == DegradationState.CLOSED);
                 assertFalse(trace.ask(fa, 10), "NORMAL cannot mint a second full burst");
                 long recoveredBefore = trace.actual;
                 for (int i = 1; i <= 10; i++) {
-                    setTime(ca, clockKey, time, 1001 + i * 100L);
+                    setTime(ca, clockKey, time, 1002 + i * 100L);
                     assertTrue(trace.ask(i % 2 == 0 ? fa : fb, 1));
                     assertFalse(trace.ask(fa, 1));
                 }
@@ -107,7 +111,10 @@ class StaggeredRecoveryEnvelopeTckTest extends TckContainers {
     }
     private static void await(BooleanSupplier condition) throws Exception {
         long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
-        while (!condition.getAsBoolean() && System.nanoTime() < deadline) Thread.sleep(10);
+        do {
+            if (condition.getAsBoolean()) return;
+            Thread.sleep(10);
+        } while (System.nanoTime() < deadline);
         assertTrue(condition.getAsBoolean(), "cohort did not reach the trace checkpoint");
     }
 }

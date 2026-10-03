@@ -58,6 +58,9 @@ class MetricCardinalityTckTest {
         // wave 1: 10,000 distinct raw tenant keys, all sharing two key-groups
         for (int i = 0; i < DISTINCT_KEYS; i++) {
             flow.tryAcquire("per-tenant", tenant("tenant-" + i));
+            // Cardinality is independent of observer throughput. Bound outstanding
+            // callbacks so host scheduling cannot turn this into a saturation test.
+            if ((i + 1) % 256 == 0) flow.flushObservations().toCompletableFuture().join();
         }
         flow.tryAcquire("global", RateLimitContext.empty());
         // a third policy exercised into rejection (result dimension > 1)
@@ -75,6 +78,9 @@ class MetricCardinalityTckTest {
         // wave 2: 10,000 fresh raw keys must not add a single meter
         for (int i = DISTINCT_KEYS; i < 2 * DISTINCT_KEYS; i++) {
             flow.tryAcquire("per-tenant", tenant("tenant-" + i));
+            // Cardinality is independent of observer throughput. Bound outstanding
+            // callbacks so host scheduling cannot turn this into a saturation test.
+            if ((i + 1) % 256 == 0) flow.flushObservations().toCompletableFuture().join();
         }
         flow.flushObservations().toCompletableFuture().join();
         assertEquals(0, flow.observationFailures());

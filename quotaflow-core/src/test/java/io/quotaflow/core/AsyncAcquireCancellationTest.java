@@ -147,6 +147,7 @@ class AsyncAcquireCancellationTest {
 
         assertTrue(waiting.isCancelled());
         assertEquals(0, flow.waitQueueDepth("t"));
+        flow.flushObservations().toCompletableFuture().orTimeout(2, TimeUnit.SECONDS).join();
         assertEquals(1, events.size(), "only the draining acquisition emitted an event");
     }
 
@@ -166,6 +167,7 @@ class AsyncAcquireCancellationTest {
 
         assertFalse(decision.isAllowed());
         assertEquals(Optional.of(ThrottleRejection.WAIT_TIMEOUT), decision.throttleRejection());
+        flow.flushObservations().toCompletableFuture().get(2, TimeUnit.SECONDS);
         assertEquals(2, events.size(), "finalized decisions still emit exactly one event each");
         assertEquals(0, flow.waitQueueDepth("t"));
     }

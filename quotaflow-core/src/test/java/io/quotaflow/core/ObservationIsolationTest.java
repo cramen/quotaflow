@@ -77,4 +77,27 @@ class ObservationIsolationTest {
         flow.close(); flow.close();
         assertThrows(IllegalStateException.class, () -> flow.replacePolicySet(POLICIES));
     }
+
+    @Test void unrelatedEventKindsCannotSaturateAListenersLane() throws Exception {
+        for (boolean waiting : List.of(false, true)) {
+            var entered = new CountDownLatch(1); var release = new CountDownLatch(1);
+            Runnable block = () -> { entered.countDown(); try { release.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); } };
+            var dispatcher = new ObservationDispatcher(waiting ? List.of() : List.of((d,g) -> block.run()),
+                    waiting ? List.of((p,g) -> block.run()) : List.of(), List.of(),
+                    new ObservationConfiguration(0, Map.of("p", "p"), Set.of()), 1, Duration.ofSeconds(10));
+            try {
+                if (waiting) dispatcher.queued(0, "p", "global");
+                else dispatcher.decision(0, Decision.allowed("p", Scope.GLOBAL, 1), "global");
+                assertTrue(entered.await(2, TimeUnit.SECONDS));
+                for (int event = 0; event < 1000; event++) {
+                    if (waiting) dispatcher.decision(0, Decision.allowed("p", Scope.GLOBAL, 1), "global");
+                    else dispatcher.queued(0, "p", "global");
+                }
+                assertEquals(0, dispatcher.failures());
+            } finally {
+                release.countDown(); dispatcher.barrier().toCompletableFuture().get(2, TimeUnit.SECONDS);
+                dispatcher.close().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            }
+        }
+    }
 }

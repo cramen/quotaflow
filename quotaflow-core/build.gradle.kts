@@ -32,10 +32,11 @@ tasks.withType<Test> {
 
 // --- Coverage gate: branch coverage >= 90% on core.
 jacoco {
-    toolVersion = "0.8.12"
+    toolVersion = "0.8.14"
 }
 
 tasks.jacocoTestReport {
+    dependsOn(tasks.test)
     reports {
         xml.required.set(true)
         html.required.set(true)
@@ -43,6 +44,7 @@ tasks.jacocoTestReport {
 }
 
 tasks.jacocoTestCoverageVerification {
+    dependsOn(tasks.test)
     violationRules {
         rule {
             element = "BUNDLE"
@@ -59,8 +61,10 @@ tasks.check { dependsOn(tasks.jacocoTestCoverageVerification) }
 
 // --- Mutation testing for correctness paths. On demand only: not part of check.
 pitest {
+    threads.set(4)
     targetClasses.set(setOf("io.quotaflow.core.*"))
     mutationThreshold.set(80)
+    outputFormats.set(setOf("XML", "HTML"))
 }
 
 // JMH measurements are environment-specific; comparison requires an explicit matching baseline.

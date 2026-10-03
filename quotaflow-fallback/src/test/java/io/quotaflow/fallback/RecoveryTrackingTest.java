@@ -51,4 +51,43 @@ class RecoveryTrackingTest {
         assertEquals(current, pin.metadata.get().request());
         tracking.release(stale); tracking.release(pin);
     }
+
+    private static LevelRequest versioned(long resolver, long capacity) {
+        var original = request("a");
+        return new LevelRequest(original.storageKey(), new Limit(capacity, 1, Duration.ofSeconds(1)),
+                Algorithm.GCRA, 1, "user", "a".repeat(64), resolver, "b".repeat(64));
+    }
+    @Test void metadataUsesConfigurationThenProviderRevisionThenObservationOrder() {
+        var tracking = new RecoveryTracking(1);
+        var initial = versioned(2, 2);
+        var pin = tracking.retain(List.of(initial), 100, 3).get(0);
+        var newerProvider = versioned(3, 3);
+        var lease = tracking.retain(List.of(newerProvider), 50, 3).get(0);
+        tracking.release(lease);
+        assertEquals(newerProvider, pin.metadata.get().request());
+        assertEquals(50, pin.metadata.get().observedAt());
+        assertEquals(100, pin.lastUse.get());
+        for (var old : List.of(versioned(2, 4), versioned(1, 5))) {
+            lease = tracking.retain(List.of(old), 200, 3).get(0);
+            tracking.release(lease);
+            assertEquals(newerProvider, pin.metadata.get().request());
+        }
+        var newerPolicy = versioned(1, 6);
+        lease = tracking.retain(List.of(newerPolicy), 25, 4).get(0);
+        tracking.release(lease);
+        assertEquals(newerPolicy, pin.metadata.get().request());
+        assertEquals(4, pin.metadata.get().revision());
+        var lateSameVersion = versioned(1, 7);
+        lease = tracking.retain(List.of(lateSameVersion), 24, 4).get(0);
+        tracking.release(lease);
+        assertEquals(newerPolicy, pin.metadata.get().request());
+        lease = tracking.retain(List.of(lateSameVersion), 25, 4).get(0);
+        tracking.release(lease);
+        assertEquals(lateSameVersion, pin.metadata.get().request());
+        assertFalse(pin.expired(7_000_000_200L, 10));
+        assertTrue(pin.expired(7_000_000_210L, 10));
+        tracking.release(pin);
+        assertEquals(0, tracking.size());
+        assertThrows(IllegalStateException.class, () -> tracking.release(pin));
+    }
 }

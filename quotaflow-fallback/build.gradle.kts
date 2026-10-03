@@ -1,6 +1,7 @@
 plugins {
     `java-library`
     `java-test-fixtures`
+    alias(libs.plugins.pitest)
     alias(libs.plugins.jmh)
 }
 
@@ -20,6 +21,7 @@ dependencies {
 
     testImplementation(platform(libs.junit.bom))
     testImplementation(libs.junit.jupiter)
+    testImplementation(libs.pitest.junit5.plugin)
     testRuntimeOnly(libs.junit.platform.launcher)
 }
 
@@ -40,3 +42,11 @@ extra["benchmarkMetrics"] = mapOf(
         "mode" to "sample", "unit" to "ms/op", "percentile" to "99.0")
 )
 apply(from = rootProject.file("gradle/benchmark-verification.gradle"))
+
+// Each correctness module must meet its own threshold; scores are never pooled.
+pitest {
+    threads.set(4)
+    targetClasses.set(setOf("io.quotaflow.fallback.*"))
+    mutationThreshold.set(80)
+    outputFormats.set(setOf("XML", "HTML"))
+}

@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "execution": "local-only",
+  "authorizedAt": "2026-10-02",
+  "hostLabel": "current-local-workstation",
+  "platform": "macOS-14.5-arm64-arm-64bit-Mach-O",
+  "architecture": "arm64",
+  "cpu": {
+    "exitCode": 0,
+    "output": "Apple M1 Pro"
+  },
+  "logicalProcessors": {
+    "exitCode": 0,
+    "output": "10"
+  },
+  "memoryBytes": {
+    "exitCode": 0,
+    "output": "34359738368"
+  },
+  "osBuild": {
+    "exitCode": 0,
+    "output": "ProductName:\t\tmacOS\nProductVersion:\t\t14.5\nBuildVersion:\t\t23F79"
+  },
+  "jdk": {
+    "exitCode": 0,
+    "output": "openjdk version \"21\" 2023-09-19\nOpenJDK Runtime Environment (build 21+35-2513)\nOpenJDK 64-Bit Server VM (build 21+35-2513, mixed mode, sharing)"
+  },
+  "docker": {
+    "exitCode": 0,
+    "output": "\"20.10.21\" 5 8232890368 \"Docker Desktop\""
+  },
+  "powerSnapshot": {
+    "exitCode": 0,
+    "output": "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=7143523)\t85%; discharging; 8:45 remaining present: true"
+  },
+  "thermalSnapshot": {
+    "exitCode": 0,
+    "output": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded"
+  },
+  "status": "HOST_CAPTURED_NOT_CERTIFIED",
+  "requiredBeforeMeasurement": [
+    "Record and verify the exact server image digest and server configuration.",
+    "Freeze workload hashes, JMH flags and baseline identity.",
+    "Record power/thermal/background conditions before and after every run.",
+    "Run at least three complete independent runs per version without concurrent verification work.",
+    "Retain every run; reject profile mismatches and classify noisy evidence as inconclusive."
+  ]
+}

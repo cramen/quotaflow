@@ -151,3 +151,6 @@ transport byte-dump handlers; apply equivalent restrictions to caller-managed
 clients and other drivers. The application owns these settings, including runtime
 changes. Quotaflow does not change global logging configuration, and its redaction
 guarantee does not cover independently emitted third-party wire dumps.
+
+Verification commands, runtime evidence and external consumer fixtures are documented
+in [the verification workflow](docs/verification.md).

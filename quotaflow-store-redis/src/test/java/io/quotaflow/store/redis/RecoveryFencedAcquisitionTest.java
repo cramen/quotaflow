@@ -88,4 +88,34 @@ class RecoveryFencedAcquisitionTest extends RedisContainerSupport {
             assertDoesNotThrow(() -> store.recoveryPrimary("default", Duration.ofSeconds(1), true).probe().toCompletableFuture().join());
         } finally { safeClient.shutdown(); }
     }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.EnumSource(Algorithm.class)
+    void cachedHealthyContextCannotSpendAcrossANewerRecoveryEpoch(Algorithm algorithm) {
+        try (var connection = client().connect(); var store = new RedisRateLimitStore(connection, RedisStoreConfig.defaults())) {
+            var domain = new QuotaDomain("default", "root");
+            var bucket = new BucketIdentity(domain, "root", Scope.GLOBAL, "shared");
+            var limit = new Limit(10, 1, Duration.ofHours(1));
+            store.registerPolicies(List.of(PolicyBinding.of(bucket, algorithm))).toCompletableFuture().join();
+            var controller = new RedisRecoveryController(connection, Duration.ofSeconds(2));
+            var cohort = RecoveryCohort.single();
+            controller.provisionCohort("default", cohort, "initial", true, true).toCompletableFuture().join();
+            controller.provisionDomain(domain, cohort, "initial", "a".repeat(64), true, true).toCompletableFuture().join();
+            var session = controller.enroll("default", cohort, "single", "owner").toCompletableFuture().join();
+            var gather = controller.attach(domain, session).toCompletableFuture().join().context();
+            var drain = controller.join(gather).toCompletableFuture().join().context();
+            var normal = controller.ready(drain).toCompletableFuture().join().context();
+            store.bindRecoveryContext(normal);
+            assertTrue(store.tryAcquire(bucket, limit, algorithm, 1).acquired());
+            var next = controller.begin(normal, "a".repeat(64), 0).toCompletableFuture().join().context();
+            assertTrue(next.epoch() > normal.epoch());
+            String key = RedisKeyScheme.defaults().singleKey(bucket), before = connection.sync().get(key);
+            var old = store.tryAcquire(bucket, limit, algorithm, 1);
+            assertFalse(old.acquired()); assertNotNull(old.recoveryPending());
+            assertEquals(before, connection.sync().get(key), "stale NORMAL must not debit or refill");
+            assertFalse(controller.ready(drain).toCompletableFuture().join().applied());
+            assertFalse(store.seed(normal, List.of(new BucketState(bucket, limit, algorithm, 10))).toCompletableFuture().join());
+            assertEquals(before, connection.sync().get(key), "a delayed healthy seed cannot restore credit");
+        }
+    }
 }

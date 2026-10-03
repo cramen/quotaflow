@@ -8,33 +8,35 @@ import java.io.*;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 class RecoveryProcessTckTest extends TckContainers {
-    @Test void independentOwnersRejectDuplicatesAndRequireExplicitMaintenanceAfterCrash() throws Exception {
+    @ParameterizedTest @EnumSource(Algorithm.class)
+    void independentOwnersRejectDuplicatesAndRequireExplicitMaintenanceAfterCrash(Algorithm algorithm) throws Exception {
         var processes = new ArrayList<Owner>();
         var client = RedisClientFactory.createClient(redisUri(), Duration.ofSeconds(2));
         var domain = new QuotaDomain("default", "quota");
         var cohort = new RecoveryCohort(List.of("a", "b"));
         try (var connection = client.connect(); var primary = new RedisRateLimitStore(connection, RedisStoreConfig.defaults())) {
-            primary.registerPolicies(List.of(new PolicyBinding(domain, "quota", Scope.GLOBAL, Algorithm.TOKEN_BUCKET))).toCompletableFuture().join();
+            primary.registerPolicies(List.of(new PolicyBinding(domain, "quota", Scope.GLOBAL, algorithm))).toCompletableFuture().join();
             var admin = new RedisRecoveryController(connection, Duration.ofSeconds(5));
             admin.provisionCohort("default", cohort, "initial", true, true).toCompletableFuture().join();
-            admin.provisionDomain(domain, cohort, "initial", RecoveryProcessOwner.policies().recoveryFingerprint("quota"), true, true).toCompletableFuture().join();
-            Owner a = start(processes, "a", "a,b"), b = start(processes, "b", "a,b");
+            admin.provisionDomain(domain, cohort, "initial", RecoveryProcessOwner.policies(algorithm).recoveryFingerprint("quota"), true, true).toCompletableFuture().join();
+            Owner a = start(processes, algorithm, "a", "a,b"), b = start(processes, algorithm, "b", "a,b");
             a.await("STATE", "CLOSED"); b.await("STATE", "CLOSED");
             assertEquals("ALLOW", a.command("ACQUIRE"));
             String manifest = RedisKeyScheme.defaults().manifestKey("default");
             var oldSession = new RecoverySession("initial", cohort.digest(), "a", 0, 1, connection.sync().hget(manifest, "rc:owner:1"));
             var oldContext = admin.read(domain, oldSession).toCompletableFuture().join().context();
-            Owner duplicate = start(processes, "a", "a,b"); duplicate.await("ACQUIRE", "INCOMPATIBLE");
+            Owner duplicate = start(processes, algorithm, "a", "a,b"); duplicate.await("ACQUIRE", "INCOMPATIBLE");
             duplicate.crash(); b.crash();
             assertEquals("OK", a.command("DISCONNECT")); a.await("STATE", "OPEN");
             assertEquals("REJECT", a.command("ACQUIRE"), "a new local observation starts empty");
             assertEquals("OK", a.command("RECONNECT"));
             Thread.sleep(300);
             assertEquals("OPEN", a.command("STATE"), "a crashed peer cannot be timed out as ready");
-            Owner restarted = start(processes, "b", "a,b"); restarted.await("ACQUIRE", "INCOMPATIBLE");
+            Owner restarted = start(processes, algorithm, "b", "a,b"); restarted.await("ACQUIRE", "INCOMPATIBLE");
             restarted.crash(); a.crash();
             // All old local processes are terminated; one full horizon drains the old distributed debt.
             Thread.sleep(1100);
@@ -42,24 +44,60 @@ class RecoveryProcessTckTest extends TckContainers {
                     "planned-replacement", true, true).toCompletableFuture().join();
             assertNotEquals("initial", incarnation);
             assertThrows(CompletionException.class, () -> primary.seed(oldContext, List.of()).toCompletableFuture().join());
-            Owner replacement = start(processes, "single", "single"); replacement.await("STATE", "CLOSED");
+            Owner replacement = start(processes, algorithm, "single", "single"); replacement.await("STATE", "CLOSED");
             assertEquals("ALLOW", replacement.command("ACQUIRE"));
             connection.sync().del(RedisKeyScheme.defaults().controlKey(domain));
             replacement.await("ACQUIRE", "INCOMPATIBLE");
             assertFalse(connection.sync().exists(RedisKeyScheme.defaults().controlKey(domain)) > 0, "runtime cannot recreate lost fencing metadata");
         } finally { processes.forEach(Owner::crash); client.shutdown(); }
     }
-    private Owner start(List<Owner> processes, String id, String members) throws Exception {
-        var owner = new Owner(redisUri(), id, members); processes.add(owner);
+
+    @ParameterizedTest @EnumSource(Algorithm.class)
+    void independentProcessesPreserveFiveVersusZeroThroughTheWholeBarrier(Algorithm algorithm) throws Exception {
+        var processes = new ArrayList<Owner>();
+        var client = RedisClientFactory.createClient(redisUri(), Duration.ofSeconds(2));
+        var domain = new QuotaDomain("default", "quota"); var cohort = new RecoveryCohort(List.of("a", "b"));
+        try (var connection = client.connect(); var primary = new RedisRateLimitStore(connection, RedisStoreConfig.defaults())) {
+            String clock = ControlledRedisClock.install(primary, domain); connection.sync().set(clock, "0");
+            primary.registerPolicies(List.of(new PolicyBinding(domain, "quota", Scope.GLOBAL, algorithm))).toCompletableFuture().join();
+            var admin = new RedisRecoveryController(connection, Duration.ofSeconds(2));
+            admin.provisionCohort("default", cohort, "initial", true, true).toCompletableFuture().join();
+            admin.provisionDomain(domain, cohort, "initial", RecoveryProcessOwner.policies(algorithm, true).recoveryFingerprint("quota"), true, true)
+                    .toCompletableFuture().join();
+            Owner a = new Owner(redisUri(), "a", "a,b", algorithm, true), b = new Owner(redisUri(), "b", "a,b", algorithm, true);
+            processes.add(a); processes.add(b);
+            assertEquals("STARTED", a.response()); assertEquals("STARTED", b.response());
+            a.await("STATE", "CLOSED"); b.await("STATE", "CLOSED");
+            assertEquals("ALLOW", a.command("ACQUIRE 10"));
+            assertEquals("OK", a.command("DISCONNECT")); assertEquals("OK", b.command("DISCONNECT"));
+            for (Owner owner : List.of(a, b)) {
+                assertEquals("REJECT", owner.command("ACQUIRE")); assertEquals("REJECT", owner.command("ACQUIRE"));
+                assertEquals("OK", owner.command("TIME 1000"));
+            }
+            assertEquals("ALLOW", b.command("ACQUIRE 5"));
+            assertEquals("OK", a.command("RECONNECT")); assertEquals("OK", a.command("TIME 1001"));
+            for (int token = 0; token < 5; token++) a.await("ACQUIRE", "ALLOW");
+            assertEquals("REJECT", a.command("ACQUIRE"));
+            assertEquals("OPEN", a.command("STATE"), "one process cannot release the cohort guard");
+            assertEquals("OK", b.command("RECONNECT")); assertEquals("OK", b.command("TIME 1001"));
+            a.await("STATE", "CLOSED"); b.await("STATE", "CLOSED");
+            assertEquals("REJECT", a.command("ACQUIRE 10")); assertEquals("REJECT", b.command("ACQUIRE 10"));
+            assertEquals("OK", a.command("TIME 1101")); assertEquals("OK", b.command("TIME 1101"));
+            assertEquals("ALLOW", a.command("ACQUIRE")); assertEquals("REJECT", b.command("ACQUIRE"));
+        } finally { processes.forEach(Owner::crash); client.shutdown(); }
+    }
+    private Owner start(List<Owner> processes, Algorithm algorithm, String id, String members) throws Exception {
+        var owner = new Owner(redisUri(), id, members, algorithm); processes.add(owner);
         assertEquals("STARTED", owner.response()); return owner;
     }
     private static final class Owner {
         private final Process process;
         private final BufferedWriter input;
         private final BlockingQueue<String> output = new LinkedBlockingQueue<>();
-        Owner(String uri, String id, String members) throws IOException {
+        Owner(String uri, String id, String members, Algorithm algorithm) throws IOException { this(uri, id, members, algorithm, false); }
+        Owner(String uri, String id, String members, Algorithm algorithm, boolean controlled) throws IOException {
             process = new ProcessBuilder(System.getProperty("java.home") + "/bin/java", "-Xmx128m", "-cp",
-                    System.getProperty("quotaflow.tck.classpath"), RecoveryProcessOwner.class.getName(), uri, id, members)
+                    System.getProperty("quotaflow.tck.classpath"), RecoveryProcessOwner.class.getName(), uri, id, members, algorithm.name(), Boolean.toString(controlled))
                     .redirectErrorStream(true).start();
             input = new BufferedWriter(new OutputStreamWriter(process.getOutputStream()));
             Thread reader = new Thread(() -> {

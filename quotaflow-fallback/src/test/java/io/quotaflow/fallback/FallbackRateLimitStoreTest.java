@@ -91,6 +91,7 @@ class FallbackRateLimitStoreTest {
         try (var store = new FallbackRateLimitStore(primary, settings(1, 10), List.of(listener))) {
             var flow = DefaultQuotaFlow.builder(policies, store).build();
             for (int i = 0; i < 10; i++) assertFalse(flow.tryAcquire("quota", RateLimitContext.empty()).isAllowed());
+            store.flushObservations().toCompletableFuture().orTimeout(2, TimeUnit.SECONDS).join();
             assertEquals(10, decisions.get()); assertEquals(0, store.trackedBuckets());
         }
     }
@@ -176,7 +177,7 @@ class FallbackRateLimitStoreTest {
     @Test void inFlightSaturationRejectsBeforeDispatchAndShutdownRetiresLeases() throws Exception {
         var policies = policies(Algorithm.TOKEN_BUCKET, 10, 10); var primary = new RecoveryPrimaryFixture(policies);
         var settings = new RecoverySettings("default", "test", "single", RecoveryCohort.single(), 10, 1,
-                Duration.ofMillis(20), Duration.ofSeconds(1));
+                Duration.ofMillis(20), Duration.ofSeconds(10));
         var delayed = new CompletableFuture<ChainResult>();
         try (var store = new FallbackRateLimitStore(primary, settings, List.of())) {
             DefaultQuotaFlow.builder(policies, store).build(); await(() -> store.state() == DegradationState.CLOSED);
@@ -186,9 +187,9 @@ class FallbackRateLimitStoreTest {
             var first = store.tryAcquireAll(request).toCompletableFuture(); await(() -> primary.acquisitions.get() == 1);
             assertFalse(store.tryAcquireAll(request).toCompletableFuture().join().acquired());
             assertEquals(1, primary.acquisitions.get());
-            store.close(); assertEquals(0, store.trackedBuckets()); assertFalse(first.join().acquired());
+            store.close(); assertEquals(0, store.trackedBuckets()); assertFalse(first.get(2, TimeUnit.SECONDS).acquired());
             delayed.complete(ChainResult.acquired(0, 9));
-            assertEquals(0, store.trackedBuckets()); assertFalse(first.join().acquired());
+            assertEquals(0, store.trackedBuckets()); assertFalse(first.get(2, TimeUnit.SECONDS).acquired());
             assertFalse(store.tryAcquireAll(request).toCompletableFuture().join().acquired());
             assertThrows(CompletionException.class, () -> store.configureRecovery(policies, "default", null).toCompletableFuture().join());
         }

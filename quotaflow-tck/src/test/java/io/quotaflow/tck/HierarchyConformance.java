@@ -70,6 +70,7 @@ final class HierarchyConformance {
             assertFalse(store.tryAcquire(parent, parentLimit, algorithm, 1).acquired());
         }
         siblingPoliciesAndRejectedChild(store, algorithm);
+        capacityOneIsSharedAcrossFacadePolicies(store, algorithm);
     }
 
     private static void siblingPoliciesAndRejectedChild(BatchRateLimitStore store, Algorithm algorithm) {
@@ -86,5 +87,25 @@ final class HierarchyConformance {
                 new LevelRequest(new BucketIdentity(domain, root + "-b", Scope.TENANT, "b"), one, algorithm, 1));
         assertTrue(store.tryAcquireAll(second).toCompletableFuture().join().acquired());
         assertFalse(store.tryAcquire(parent, two, algorithm, 1).acquired());
+    }
+
+    private static void capacityOneIsSharedAcrossFacadePolicies(BatchRateLimitStore store, Algorithm algorithm) throws Exception {
+        String root = "facade-" + UUID.randomUUID();
+        var parent = io.quotaflow.core.RateLimitPolicy.builder(root).scope(Scope.GLOBAL).algorithm(algorithm)
+                .limit(new Limit(1, 1, Duration.ofHours(1))).build();
+        var first = io.quotaflow.core.RateLimitPolicy.builder(root + "-a").scope(Scope.TENANT).parentId(root).algorithm(algorithm)
+                .limit(new Limit(10, 1, Duration.ofHours(1))).build();
+        var second = io.quotaflow.core.RateLimitPolicy.builder(root + "-b").scope(Scope.TENANT).parentId(root).algorithm(algorithm)
+                .limit(new Limit(10, 1, Duration.ofHours(1))).build();
+        var policies = io.quotaflow.core.PolicySet.compile(List.of(parent, first, second));
+        var context = io.quotaflow.core.RateLimitContext.builder().put(io.quotaflow.core.RateLimitContext.TENANT_ID, "shared").build();
+        try (var flow = io.quotaflow.core.DefaultQuotaFlow.builder(policies, store).operationTimeout(Duration.ofSeconds(5)).build()) {
+            var a = flow.tryAcquireAsync(first.id(), context, 1).toCompletableFuture();
+            var b = flow.tryAcquireAsync(second.id(), context, 1).toCompletableFuture();
+            long allowed = java.util.stream.Stream.of(a.get(10, java.util.concurrent.TimeUnit.SECONDS),
+                    b.get(10, java.util.concurrent.TimeUnit.SECONDS)).filter(io.quotaflow.core.Decision::isAllowed).count();
+            assertEquals(1, allowed, "two distinct requesting policies must share the capacity-one provider");
+            assertFalse(flow.tryAcquire(root, context).isAllowed(), "direct-parent invocation must see the same debit");
+        }
     }
 }

@@ -27,7 +27,8 @@ class GcraScriptTest extends RedisContainerSupport {
         try (StatefulRedisConnection<String, String> connection = client().connect();
                 RedisRateLimitStore store = newStore(connection)) {
             String key = storageKey("p", "user", "alice");
-            Limit limit = new Limit(5, 1, Duration.ofSeconds(1));
+            Limit limit = new Limit(5, 1, Duration.ofHours(1));
+            long started = System.nanoTime();
             for (int i = 0; i < 5; i++) {
                 StoreResult result = store.tryAcquire(key(key), limit, Algorithm.GCRA, 1);
                 assertTrue(result.acquired(), "request " + i + " should be allowed");
@@ -36,8 +37,12 @@ class GcraScriptTest extends RedisContainerSupport {
             StoreResult rejected = store.tryAcquire(key(key), limit, Algorithm.GCRA, 1);
             assertFalse(rejected.acquired());
             assertEquals(0, rejected.remaining());
-            // the next slot opens one emission interval (1 s) out
-            assertTrue(rejected.retryAfterMillis() >= 900 && rejected.retryAfterMillis() <= 1100,
+            // Bound the server schedule by actual elapsed request time; this assertion
+            // must not assume that five requests finish within 100 ms on every host.
+            long elapsed = Duration.ofNanos(System.nanoTime() - started).toMillis();
+            long interval = limit.refillPeriod().toMillis();
+            assertTrue(rejected.retryAfterMillis() >= Math.max(0, interval - elapsed - 1)
+                    && rejected.retryAfterMillis() <= interval,
                     "retryAfter was " + rejected.retryAfterMillis());
         }
     }

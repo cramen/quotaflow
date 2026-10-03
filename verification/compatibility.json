@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "reviewedAt": "2026-10-03",
+  "source": "https://docs.spring.io/spring-boot/",
+  "bytecodeJdk": 17,
+  "testJdks": [17, 21, 25],
+  "springBoot": [
+    {"version": "4.1.1", "role": "latest-ga-minor", "status": "REQUIRED_NOT_CERTIFIED"},
+    {"version": "4.0.8", "role": "previous-ga-minor", "status": "REQUIRED_NOT_CERTIFIED"},
+    {"version": "3.5.16", "role": "advertised-regression", "status": "REQUIRED_NOT_CERTIFIED"}
+  ],
+  "servers": [
+    {"image": "redis:6.2.24-alpine", "topologies": ["standalone", "sentinel", "cluster"]},
+    {"image": "valkey/valkey:8.0-alpine", "topologies": ["standalone", "sentinel", "cluster"]}
+  ],
+  "publishedModules": ["quotaflow-core", "quotaflow-store-redis", "quotaflow-fallback", "quotaflow-config", "quotaflow-spring-boot-starter", "quotaflow-kotlin", "quotaflow-micrometer"],
+  "internalModules": ["quotaflow-tck", "quotaflow-native-smoke"],
+  "certification": "Required targets only. Successful exact-candidate reports are mandatory; this manifest alone certifies nothing."
+}

@@ -27,6 +27,10 @@ val moduleDescriptions = mapOf(
 )
 
 subprojects {
+    dependencyLocking {
+        lockAllConfigurations()
+        lockMode.set(LockMode.STRICT)
+    }
     group = "io.quotaflow"
     // The repository stays on a snapshot version between releases; the release
     // workflow passes -Pversion=<tag without the v prefix>.
@@ -37,6 +41,19 @@ subprojects {
     }
 
     plugins.withId("java-library") {
+        apply(from = rootProject.file("gradle/test-runtime.gradle"))
+        tasks.withType<JavaCompile>().configureEach { options.encoding = "UTF-8" }
+        tasks.withType<Javadoc>().configureEach {
+            options.encoding = "UTF-8"
+            (options as StandardJavadocDocletOptions).apply {
+                charSet = "UTF-8"
+                docEncoding = "UTF-8"
+            }
+        }
+        tasks.withType<AbstractArchiveTask>().configureEach {
+            isPreserveFileTimestamps = false
+            isReproducibleFileOrder = true
+        }
         // Dependency audit: each module declares an allowlist of group:module
         // entries (the "group:*" wildcard matches any artifact of that group) via
         // extra["dependencyAuditAllowlist"]; anything else on the runtime
@@ -49,9 +66,7 @@ subprojects {
 
             doLast {
                 val allowlist = (project.extra["dependencyAuditAllowlist"] as List<*>).map { it.toString() }
-                val found = runtimeClasspath.get().incoming.artifactView {
-                    lenient(true)
-                }.artifacts.artifacts.mapNotNull { artifact ->
+                val found = runtimeClasspath.get().incoming.artifactView { }.artifacts.artifacts.mapNotNull { artifact ->
                     val id = artifact.variant.owner as? ModuleComponentIdentifier
                     id?.let { "${it.group}:${it.module}" }
                 }.toSortedSet()
@@ -117,6 +132,15 @@ subprojects {
                 }
             }
 
+            if (providers.gradleProperty("verificationRepository").isPresent) {
+                extensions.configure<org.gradle.api.publish.PublishingExtension> {
+                    repositories.maven {
+                        name = "Verification"
+                        url = rootProject.uri(providers.gradleProperty("verificationRepository").get())
+                    }
+                }
+            }
+
             // Signing happens only in the release context: the armored PGP
             // private key reaches the build exclusively via the
             // ORG_GRADLE_PROJECT_signingInMemoryKey* environment variables
@@ -132,5 +156,42 @@ subprojects {
                 }
             }
         }
+    }
+}
+
+
+tasks.register("correctnessGate") {
+    group = "verification"
+    description = "Requires independent core and fallback mutation thresholds."
+    dependsOn(":quotaflow-core:pitest", ":quotaflow-fallback:pitest")
+    doLast {
+        val factory = javax.xml.parsers.DocumentBuilderFactory.newInstance().apply {
+            setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
+            isExpandEntityReferences = false
+        }
+        for (module in listOf("core", "fallback")) {
+            val report = file("quotaflow-$module/build/reports/pitest/mutations.xml")
+            val mutations = factory.newDocumentBuilder().parse(report).getElementsByTagName("mutation")
+            var detected = 0
+            for (index in 0 until mutations.length) {
+                val attributes = mutations.item(index).attributes
+                val status = attributes.getNamedItem("status").nodeValue
+                if (status !in setOf("KILLED", "SURVIVED", "NO_COVERAGE", "TIMED_OUT", "NON_VIABLE"))
+                    throw GradleException("$module mutation analysis is incomplete: $status")
+                if (attributes.getNamedItem("detected").nodeValue == "true") detected++
+            }
+            // PIT rounds its displayed percentage. Release acceptance uses the exact ratio.
+            if (mutations.length == 0 || detected.toLong() * 100 < mutations.length.toLong() * 80)
+                throw GradleException("$module mutation score is below 80%: $detected/${mutations.length}")
+            logger.lifecycle("$module mutation gate: $detected/${mutations.length} detected")
+        }
+    }
+}
+
+// CI may validate benchmark evidence, but the user-selected measurement host is local.
+gradle.taskGraph.whenReady {
+    if (providers.environmentVariable("GITHUB_ACTIONS").orElse("false").get() == "true" &&
+        allTasks.any { it.name == "jmh" }) {
+        throw GradleException("Benchmark execution is local-only; GitHub may validate imported evidence.")
     }
 }

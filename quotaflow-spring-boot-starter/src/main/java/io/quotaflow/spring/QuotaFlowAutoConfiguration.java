@@ -217,8 +217,8 @@ public class QuotaFlowAutoConfiguration implements org.springframework.beans.fac
     @Role(BeanDefinition.ROLE_INFRASTRUCTURE)
     @ConditionalOnBean(RateLimitInterceptor.class)
     @ConditionalOnMissingBean
-    RateLimitedAdvisor rateLimitedAdvisor(RateLimitInterceptor interceptor) {
-        return new RateLimitedAdvisor(interceptor);
+    RateLimitedAdvisor rateLimitedAdvisor(ObjectProvider<RateLimitInterceptor> interceptor) {
+        return RateLimitedAdvisor.deferred(interceptor::getObject);
     }
 
     /**

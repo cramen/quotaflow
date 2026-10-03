@@ -68,10 +68,22 @@ public final class RedisClientFactory {
     /** URI copies used by the driver must not render userinfo through a static credentials provider. */
     private static final class DiagnosticRedisURI extends io.lettuce.core.RedisURI {
         DiagnosticRedisURI(io.lettuce.core.RedisURI source) {
-            super(source);
+            // Boot consumers can manage Lettuce 6.6/6.8, which have no copy constructor.
+            // Preserve URI settings through the public API shared with Lettuce 7.
+            if (source.getHost() != null) setHost(source.getHost());
+            setPort(source.getPort());
+            if (source.getSocket() != null) setSocket(source.getSocket());
+            setTimeout(source.getTimeout());
+            setDatabase(source.getDatabase());
+            if (source.getSentinelMasterId() != null) setSentinelMasterId(source.getSentinelMasterId());
+            if (source.getClientName() != null) setClientName(source.getClientName());
+            if (source.getLibraryName() != null) setLibraryName(source.getLibraryName());
+            if (source.getLibraryVersion() != null) setLibraryVersion(source.getLibraryVersion());
+            applySsl(source);
+            applyAuthentication(source);
             var provider = source.getCredentialsProvider();
             if (provider != null) setCredentialsProvider(new SafeCredentialsProvider(provider));
-            getSentinels().replaceAll(DiagnosticRedisURI::new);
+            source.getSentinels().forEach(sentinel -> getSentinels().add(new DiagnosticRedisURI(sentinel)));
         }
         @Override public String toString() {
             String host = getHost();

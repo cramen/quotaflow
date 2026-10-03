@@ -1,0 +1,65 @@
+import groovy.json.JsonOutput
+import org.gradle.jvm.toolchain.JavaLanguageVersion
+import org.gradle.jvm.toolchain.JavaToolchainService
+import org.gradle.api.tasks.compile.JavaCompile
+import org.gradle.api.tasks.bundling.Jar
+import org.gradle.api.tasks.testing.Test
+import org.gradle.api.tasks.JavaExec
+
+// Compilation remains on Java 17. Only worker execution follows this checked input.
+def selected = providers.gradleProperty('testJdk').orElse('17').get()
+if (!(selected in ['17', '21', '25'])) {
+    throw new GradleException('testJdk must be one of 17, 21, 25')
+}
+def feature = selected.toInteger()
+def allowIncomplete = providers.gradleProperty('allowIncompleteVerification').orElse('false').get()
+if (!(allowIncomplete in ['true', 'false'])) throw new GradleException('allowIncompleteVerification must be true or false')
+if (allowIncomplete == 'true' && providers.environmentVariable('CI').orElse('false').get() == 'true') {
+    throw new GradleException('CI cannot opt out of complete verification')
+}
+def toolchains = extensions.getByType(JavaToolchainService)
+def workerLauncher = toolchains.launcherFor { languageVersion = JavaLanguageVersion.of(feature) }
+def guardCompile = tasks.register('compileRuntimeGuard', JavaCompile) {
+    source(rootProject.file('gradle/verification/RuntimeGuard.java'))
+    classpath = files()
+    destinationDirectory = layout.buildDirectory.dir('verification/runtime-guard/classes')
+    javaCompiler = toolchains.compilerFor { languageVersion = JavaLanguageVersion.of(17) }
+    options.release = 17
+}
+def guardJar = tasks.register('runtimeGuardJar', Jar) {
+    dependsOn(guardCompile)
+    from(guardCompile.flatMap { it.destinationDirectory })
+    archiveFileName = 'runtime-guard.jar'
+    destinationDirectory = layout.buildDirectory.dir('verification/runtime-guard')
+    manifest { attributes('Premain-Class': 'io.quotaflow.verification.RuntimeGuard') }
+}
+tasks.withType(Test).configureEach {
+    dependsOn(guardJar)
+    javaLauncher = workerLauncher
+    inputs.property('verifiedTestJdk', feature)
+    inputs.property('allowIncompleteVerification', allowIncomplete)
+    def reports = layout.buildDirectory.dir("reports/runtime/${name}-jdk${feature}")
+    outputs.dir(reports)
+    afterSuite { descriptor, result ->
+        if (descriptor.parent == null) {
+            def directory = reports.get().asFile
+            directory.mkdirs()
+            def complete = result.testCount > 0 && result.skippedTestCount == 0 && result.failedTestCount == 0
+            new File(directory, 'test-result.json').text = JsonOutput.prettyPrint(JsonOutput.toJson([
+                task: path, expectedJdk: feature, tests: result.testCount,
+                skipped: result.skippedTestCount, failures: result.failedTestCount,
+                status: complete ? 'PASS' : 'INCOMPLETE'
+            ])) + '\n'
+            if (!complete && allowIncomplete != 'true') {
+                throw new GradleException("${path}: required verification was empty, skipped or failed; see ${directory}")
+            }
+        }
+    }
+    doFirst {
+        delete(reports)
+        jvmArgs("-javaagent:${guardJar.get().archiveFile.get().asFile.absolutePath}=${feature},${reports.get().asFile.absolutePath}")
+    }
+}
+tasks.withType(JavaExec).configureEach {
+    javaLauncher = workerLauncher
+}

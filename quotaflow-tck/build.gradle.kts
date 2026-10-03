@@ -40,6 +40,7 @@ dependencies {
     implementation(project(":quotaflow-kotlin"))
     implementation(project(":quotaflow-micrometer"))
 
+    testImplementation(libs.jackson.databind)
     testImplementation(platform(libs.junit.bom))
     testImplementation(libs.junit.jupiter)
     testRuntimeOnly(libs.junit.platform.launcher)
@@ -54,16 +55,60 @@ tasks.withType<Test> {
 
 // --- Soak profile (D5): NOT part of check — on-demand and nightly only.
 // Sustained mixed traffic with periodic Redis pause/unpause degradation
-// injection and continuous invariant assertions. Default 5 minutes; the
+// injection and continuous invariant assertions. Default one hour; the
 // nightly workflow runs 1 h and reports environment-specific probe latency.
 tasks.register<JavaExec>("soakTest") {
     group = "verification"
     description = "Runs the soak profile: sustained mixed traffic with periodic degradation injection " +
-        "(default 5 min; -PsoakDurationSeconds=3600 for the nightly profile)."
+        "(default 1 h; -PsoakDurationSeconds=60 for a diagnostic run)."
     mainClass.set("io.quotaflow.tck.SoakHarness")
     classpath = sourceSets["test"].runtimeClasspath
     // fixed heap ceiling: unbounded state growth would surface as OOM
     jvmArgs("-Xmx512m")
     systemProperty("quotaflow.soak.duration.seconds",
-        providers.gradleProperty("soakDurationSeconds").orElse("300").get())
+        providers.gradleProperty("soakDurationSeconds").orElse("3600").get())
 }
+
+// Virtual-thread sources are compiled only with a capable JDK, never reflection-skipped.
+val verificationJdk = providers.gradleProperty("testJdk").orElse("17").get().toInt()
+if (verificationJdk >= 21) {
+    val virtualTest = sourceSets.create("virtualTest") {
+        compileClasspath += sourceSets.test.get().output
+        runtimeClasspath += sourceSets.test.get().output
+    }
+    configurations[virtualTest.implementationConfigurationName].extendsFrom(configurations.testImplementation.get())
+    configurations[virtualTest.runtimeOnlyConfigurationName].extendsFrom(configurations.testRuntimeOnly.get())
+    dependencies {
+        add(virtualTest.implementationConfigurationName, testFixtures(project(":quotaflow-fallback")))
+    }
+    tasks.named<JavaCompile>(virtualTest.compileJavaTaskName) {
+        javaCompiler = javaToolchains.compilerFor { languageVersion = JavaLanguageVersion.of(verificationJdk) }
+        options.release.set(21)
+    }
+    val virtualThreads = tasks.register<Test>("virtualTest") {
+        description = "Runs 100,000 virtual callers per algorithm/path and verifies JFR pinning attribution."
+        testClassesDirs = virtualTest.output.classesDirs
+        include("**/*VirtualTest.class", "**/PinningControlTest.class")
+        classpath = virtualTest.runtimeClasspath
+        useJUnitPlatform()
+        maxHeapSize = "1g"
+        val phaseReports = layout.buildDirectory.dir("reports/virtual-threads/jdk$verificationJdk")
+        outputs.dir(phaseReports)
+        doFirst { delete(phaseReports) }
+        forkEvery = 1
+        maxParallelForks = 1
+        shouldRunAfter(tasks.test)
+        systemProperty("quotaflow.tck.classpath", virtualTest.runtimeClasspath.asPath)
+    }
+    tasks.check { dependsOn(virtualThreads) }
+}
+
+// Real failover/redirection is required on both supported server implementations.
+val valkeyTopology = tasks.register<Test>("valkeyTopologyTest") {
+    testClassesDirs = sourceSets.test.get().output.classesDirs
+    classpath = sourceSets.test.get().runtimeClasspath
+    include("**/ClusterTopologyTckTest.class", "**/SentinelTopologyTckTest.class")
+    systemProperty("quotaflow.topology.valkey", "true")
+    shouldRunAfter(tasks.test)
+}
+tasks.check { dependsOn(valkeyTopology) }

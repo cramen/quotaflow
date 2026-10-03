@@ -30,6 +30,8 @@ public class RateLimitExceptionHandler {
                 ProblemDetail.forStatusAndDetail(HttpStatus.TOO_MANY_REQUESTS, problem.detail());
         body.setType(problem.type());
         body.setTitle(problem.title());
+        // Spring fills a missing instance with the request URI, which may contain raw quota keys.
+        body.setInstance(java.net.URI.create("urn:uuid:" + java.util.UUID.randomUUID()));
         ResponseEntity.BodyBuilder response = ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
                 .contentType(MediaType.APPLICATION_PROBLEM_JSON);
         if (problem.retryAfterSeconds().isPresent()) {

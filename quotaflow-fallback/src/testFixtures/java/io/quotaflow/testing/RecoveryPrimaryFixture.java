@@ -13,11 +13,14 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public final class RecoveryPrimaryFixture implements RecoveryPrimary {
     public volatile boolean available = true;
+    public volatile boolean startGather;
     public volatile boolean allow = true;
     public volatile boolean rejectConfigurationProposals;
     public volatile long reportedRemaining;
     public volatile boolean awaitOtherMembers;
+    public volatile boolean awaitOtherReadiness;
     public final AtomicInteger joins = new AtomicInteger();
+    public final AtomicInteger configurations = new AtomicInteger();
     public volatile java.util.function.Function<List<LevelRequest>, CompletionStage<ChainResult>> accounting;
     public final AtomicInteger acquisitions = new AtomicInteger();
     public final AtomicInteger probes = new AtomicInteger();
@@ -54,7 +57,8 @@ public final class RecoveryPrimaryFixture implements RecoveryPrimary {
     @Override public CompletionStage<RecoveryControlResult> attach(QuotaDomain domain, RecoverySession session) {
         if (!available) return reply(null);
         return reply(contexts.computeIfAbsent(domain, ignored -> new RecoveryControlResult(true,
-                new RecoveryContext(domain, session, 1, 1, 0, policies.recoveryFingerprint(domain.rootPolicyId()), RecoveryPhase.NORMAL), cohortSize, cohortSize, 1)));
+                new RecoveryContext(domain, session, 1, 1, 0, policies.recoveryFingerprint(domain.rootPolicyId()), startGather ? RecoveryPhase.GATHER : RecoveryPhase.NORMAL),
+                startGather ? 0 : cohortSize, startGather ? 0 : cohortSize, startGather ? 0 : 1)));
     }
     @Override public CompletionStage<RecoveryControlResult> read(QuotaDomain domain, RecoverySession session) { return reply(contexts.get(domain)); }
     private CompletionStage<RecoveryControlResult> move(RecoveryContext old, String fingerprint, RecoveryPhase phase, boolean advanceEpoch) {
@@ -87,6 +91,7 @@ public final class RecoveryPrimaryFixture implements RecoveryPrimary {
         return move(old, configuration, RecoveryPhase.GATHER, true);
     }
     @Override public CompletionStage<RecoveryControlResult> configure(RecoveryContext old, RecoveryConfiguration configuration) {
+        configurations.incrementAndGet();
         if (rejectConfigurationProposals) return rejected(old);
         return move(old, configuration, old.phase(), false);
     }
@@ -100,6 +105,15 @@ public final class RecoveryPrimaryFixture implements RecoveryPrimary {
         return move(old, old.configurationFingerprint(), RecoveryPhase.DRAIN, false);
     }
     @Override public CompletionStage<RecoveryControlResult> ready(RecoveryContext old) {
+        if (awaitOtherReadiness) {
+            if (!available) return reply(null);
+            var current = contexts.get(old.domain());
+            if (!current.context().equals(old)) return rejected(old);
+            var result = new RecoveryControlResult(true, old, cohortSize, 1, current.retiredEpoch(),
+                    current.resolverFloor(), current.resolverFloorFingerprint());
+            contexts.put(old.domain(), result); lastReady = result; onReady.run(); readiness.incrementAndGet();
+            return delayedReady != null ? delayedReady : reply(result);
+        }
         return move(old, old.configurationFingerprint(), RecoveryPhase.NORMAL, false).thenCompose(result -> {
             lastReady = result; onReady.run(); readiness.incrementAndGet();
             return delayedReady != null ? delayedReady : CompletableFuture.completedFuture(result);

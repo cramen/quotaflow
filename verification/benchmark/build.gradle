@@ -1,0 +1,16 @@
+plugins { id 'java'; id 'me.champeau.jmh' version '0.7.3' }
+repositories {
+    maven { url = uri(providers.gradleProperty('verificationRepository').get()) }
+    mavenCentral()
+}
+java { toolchain { languageVersion = JavaLanguageVersion.of(21) } }
+dependencies {
+    implementation "io.quotaflow:quotaflow-store-redis:${providers.gradleProperty('candidateVersion').get()}"
+    implementation "io.quotaflow:quotaflow-fallback:${providers.gradleProperty('candidateVersion').get()}"
+}
+sourceSets.jmh.java.srcDir '../../quotaflow-fallback/src/testFixtures/java'
+jmh { jmhVersion = '1.37' }
+gradle.taskGraph.whenReady { graph ->
+    if (System.getenv('GITHUB_ACTIONS') == 'true' && graph.allTasks.any { it.name == 'jmh' })
+        throw new GradleException('Benchmarks must run on the authorized local machine, never in GitHub.')
+}

@@ -1,0 +1,33 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.5.16'
+    id 'org.graalvm.buildtools.native' version '1.1.14'
+}
+def stack = providers.gradleProperty('webStack').orElse('servlet')
+repositories {
+    maven { url = uri(providers.gradleProperty('verificationRepository').get()) }
+    mavenCentral()
+}
+dependencies {
+    implementation platform('org.springframework.boot:spring-boot-dependencies:3.5.16')
+    implementation "io.quotaflow:quotaflow-spring-boot-starter:${providers.gradleProperty('candidateVersion').get()}"
+    implementation stack.get() == 'servlet' ? 'org.springframework.boot:spring-boot-starter-web' : 'org.springframework.boot:spring-boot-starter-webflux'
+}
+// The deterministic primary only supplies control replies. The real fallback owner,
+// local accounting, Spring integration and observation adapters remain production code.
+sourceSets.main.java.srcDir '../../quotaflow-fallback/src/testFixtures/java'
+springBoot { mainClass = 'io.quotaflow.verification.nativefixture.NativeCompatibilityApplication' }
+tasks.named('processAot') {
+    systemProperty 'verification.stack', stack.get()
+    systemProperty 'spring.main.web-application-type', stack.get()
+}
+graalvmNative {
+    metadataRepository { enabled = false }
+    binaries.main {
+        imageName = "quotaflow-${stack.get()}"
+        buildArgs.addAll('--no-fallback', '-H:+SharedArenaSupport', '-J-Xmx6g', '-march=compatibility')
+    }
+}
+
+java { toolchain { languageVersion = JavaLanguageVersion.of(25) } }
+tasks.withType(JavaCompile).configureEach { options.release = 17 }

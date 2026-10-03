@@ -7,7 +7,7 @@ on:
 
 jobs:
   # Performance certification must not silently fall back to diagnostic mode.
-  # Profile/baseline provisioning is owned by enforce-release-quality-gates.
+  # Benchmarks run locally; GitHub accepts only an independently pinned evidence bundle.
   verify:
     runs-on: ubuntu-latest
     steps:
@@ -31,13 +31,59 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 21
+          java-version: |
+            17
+            21
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Build, test, audit, and run benchmark gates
-        run: ./gradlew build dependencyAudit :quotaflow-core:benchmarkGate :quotaflow-store-redis:benchmarkGate -PrequireBenchmarkComparison
+      - name: Build, test, and audit
+        run: |
+          ./gradlew build dependencyAudit -PtestJdk=21 -Pversion="${GITHUB_REF_NAME#v}"
+          ./gradlew correctnessGate -PtestJdk=17 -Pversion="${GITHUB_REF_NAME#v}"
+
+      - name: Verify evidence validator negative controls
+        run: |
+          python3 scripts/test_quality_thresholds.py
+          python3 scripts/test_performance_bundle.py
+          python3 scripts/test_release_evidence.py
+          python3 scripts/test_evidence_collection.py
+
+      - name: Capture exact candidate identity
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          artifacts=()
+          for module in core store-redis fallback config spring-boot-starter kotlin micrometer; do
+            artifacts+=("quotaflow-$module/build/libs/quotaflow-$module-$version.jar")
+          done
+          python3 scripts/candidate_identity.py --version "$version" \
+            --artifacts "${artifacts[@]}" --output build/release-candidate.json
+
+      - name: Import pinned local verification evidence
+        env:
+          EVIDENCE_URL: ${{ vars.QUOTAFLOW_RELEASE_EVIDENCE_URL }}
+          EVIDENCE_SHA256: ${{ vars.QUOTAFLOW_RELEASE_EVIDENCE_SHA256 }}
+          MANIFEST_SHA256: ${{ vars.QUOTAFLOW_RELEASE_MANIFEST_SHA256 }}
+          BASELINE_SHA256: ${{ vars.QUOTAFLOW_BASELINE_REVIEW_SHA256 }}
+        run: |
+          python3 scripts/import_release_bundle.py --url "$EVIDENCE_URL" \
+            --sha256 "$EVIDENCE_SHA256" --output build/imported-release-evidence
+          python3 scripts/verify_release_evidence.py build/imported-release-evidence \
+            --sha256 "$MANIFEST_SHA256" --candidate build/release-candidate.json \
+            --baseline-review-sha256 "$BASELINE_SHA256" > build/release-acceptance.json
+
+      - name: Retain verification diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-verification
+          path: |
+            **/build/reports/**
+            **/build/test-results/**
+            build/release-candidate*.json
+            build/release-acceptance.json
 
   # Publishes all modules in one Central deployment (all-or-none), signs with
   # the project's PGP key, and drafts the GitHub Release with the SBOM.
@@ -63,7 +109,9 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 21
+          java-version: |
+            17
+            21
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4

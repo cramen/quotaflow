@@ -1,0 +1,22 @@
+plugins { id 'application' }
+repositories {
+    maven { url = uri(providers.gradleProperty('verificationRepository').get()) }
+    mavenCentral()
+}
+def boot = providers.gradleProperty('bootVersion').get()
+def candidate = providers.gradleProperty('candidateVersion').get()
+java { toolchain { languageVersion = JavaLanguageVersion.of(17) } }
+dependencies {
+    implementation platform("org.springframework.boot:spring-boot-dependencies:${boot}")
+    implementation "io.quotaflow:quotaflow-spring-boot-starter:${candidate}"
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-webflux'
+}
+application { mainClass = 'io.quotaflow.verification.consumer.CompatibilityApplication' }
+tasks.named('run', JavaExec) {
+    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(providers.gradleProperty('testJdk').orElse('17').get().toInteger()) }
+    systemProperty 'verification.jdk', providers.gradleProperty('testJdk').orElse('17').get()
+    systemProperty 'verification.boot', boot
+    if (providers.gradleProperty('redisUrl').isPresent()) systemProperty 'verification.redisUrl', providers.gradleProperty('redisUrl').get()
+    systemProperty 'verification.stack', providers.gradleProperty('webStack').orElse('servlet').get()
+}
