@@ -186,7 +186,7 @@ class CoordinatedRecoveryTckTest extends TckContainers {
                 Thread.sleep(100);
                 assertEquals(1, store.trackedBuckets(), "unacknowledged dispatch must survive an elapsed refill horizon");
                 available.set(true); clock.addAndGet(TimeUnit.SECONDS.toNanos(1));
-                await(() -> store.state() == DegradationState.CLOSED);
+                await(() -> store.state() == DegradationState.CLOSED && store.trackedBuckets() == 0);
                 assertEquals(0, store.trackedBuckets(), "authoritative dispatch fencing retires old uncertainty");
                 assertEquals(1, executions.get(), "control probes must not execute business acquisitions");
             }

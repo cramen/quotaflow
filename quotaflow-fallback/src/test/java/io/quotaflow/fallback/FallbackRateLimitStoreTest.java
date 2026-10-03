@@ -210,7 +210,7 @@ class FallbackRateLimitStoreTest {
             primary.delayedReady = lost; primary.available = true;
             await(() -> held.get() != null);
             assertNotNull(held.get().recoveryPending());
-            await(() -> store.state() == DegradationState.CLOSED);
+            await(() -> store.state() == DegradationState.CLOSED && store.trackedBuckets() == 0);
             assertEquals(0, store.trackedBuckets());
             primary.available = false;
             flow.tryAcquire("quota", RateLimitContext.empty()); flow.tryAcquire("quota", RateLimitContext.empty());

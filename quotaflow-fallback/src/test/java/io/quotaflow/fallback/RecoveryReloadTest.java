@@ -121,7 +121,7 @@ class RecoveryReloadTest {
             Thread.sleep(150);
             assertFalse(flow.tryAcquire("quota", RateLimitContext.empty()).isAllowed(), "timeout or a larger tariff is not proof of a completed barrier");
             primary.available = true; time.addAndGet(Duration.ofSeconds(1).toNanos());
-            FallbackRateLimitStoreTest.await(() -> store.state() == DegradationState.CLOSED);
+            FallbackRateLimitStoreTest.await(() -> store.state() == DegradationState.CLOSED && store.trackedBuckets() == 0);
             assertEquals(0, store.trackedBuckets()); lost.complete(primary.lastReady);
             assertEquals(DegradationState.CLOSED, store.state());
         }
@@ -311,7 +311,7 @@ class RecoveryReloadTest {
             assertFalse(flow.tryAcquire("quota", RateLimitContext.empty()).isAllowed(), "old NORMAL cannot reopen a newer epoch");
             fixture.awaitOtherMembers = false;
             fixture.join(fixture.current(domain).context()).toCompletableFuture().join();
-            FallbackRateLimitStoreTest.await(() -> store.state() == DegradationState.CLOSED);
+            FallbackRateLimitStoreTest.await(() -> store.state() == DegradationState.CLOSED && store.trackedBuckets() == 0);
             assertEquals(0, store.trackedBuckets());
         } finally { lost.cancel(false); }
     }

@@ -44,12 +44,8 @@ class StaggeredRecoveryEnvelopeTckTest extends TckContainers {
                 setTime(ca, clockKey, time, 1000);
                 assertTrue(trace.ask(fb, 5)); // exact A=5, B=0 guard state before A rejoins
                 onlineA.set(true);
-                // Advance after connectivity changes so a retry backoff captured at the
-                // preceding frozen timestamp can expire. Neither local share earns a
-                // whole extra token during these one-second transitions.
-                setTime(ca, clockKey, time, 1001);
                 String control = RedisKeyScheme.defaults().controlKey(domain);
-                await(() -> "GATHER".equals(ca.sync().hget(control, "phase")) && "1".equals(ca.sync().hget(control, "joined")));
+                awaitRecovery(() -> "GATHER".equals(ca.sync().hget(control, "phase")) && "1".equals(ca.sync().hget(control, "joined")), ca, clockKey, time);
                 var bucket = new BucketIdentity(domain, "quota", Scope.GLOBAL, "global");
                 assertEquals(5, Long.parseLong(ca.sync().get(RedisKeyScheme.defaults().singleKey(bucket)).split(":")[3]), "seed is own r, never N*r");
                 long before = trace.actual; long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
@@ -59,12 +55,14 @@ class StaggeredRecoveryEnvelopeTckTest extends TckContainers {
                 assertEquals(5, trace.actual - before);
                 assertFalse(trace.ask(fa, 1), "guard prevents another primary burst while B is local-only");
                 assertNotEquals(DegradationState.CLOSED, a.state());
-                onlineB.set(true); setTime(ca, clockKey, time, 1002);
-                await(() -> a.state() == DegradationState.CLOSED && b.state() == DegradationState.CLOSED);
+                onlineB.set(true);
+                awaitRecovery(() -> a.state() == DegradationState.CLOSED && b.state() == DegradationState.CLOSED
+                        && a.trackedBuckets() == 0 && b.trackedBuckets() == 0, ca, clockKey, time);
                 assertFalse(trace.ask(fa, 10), "NORMAL cannot mint a second full burst");
                 long recoveredBefore = trace.actual;
+                long recoveredAt = time.get();
                 for (int i = 1; i <= 10; i++) {
-                    setTime(ca, clockKey, time, 1002 + i * 100L);
+                    setNanos(ca, clockKey, time, recoveredAt + TimeUnit.SECONDS.toNanos(i * 100L));
                     assertTrue(trace.ask(i % 2 == 0 ? fa : fb, 1));
                     assertFalse(trace.ask(fa, 1));
                 }
@@ -96,7 +94,23 @@ class StaggeredRecoveryEnvelopeTckTest extends TckContainers {
         }
     }
     private static void setTime(io.lettuce.core.api.StatefulRedisConnection<String, String> connection, String key, AtomicLong local, long seconds) {
-        long nanos = TimeUnit.SECONDS.toNanos(seconds); connection.sync().set(key, Long.toString(nanos)); local.set(nanos);
+        setNanos(connection, key, local, TimeUnit.SECONDS.toNanos(seconds));
+    }
+    private static void setNanos(io.lettuce.core.api.StatefulRedisConnection<String, String> connection, String key, AtomicLong local, long nanos) {
+        connection.sync().set(key, Long.toString(nanos)); local.set(nanos);
+    }
+    private static void awaitRecovery(BooleanSupplier condition, io.lettuce.core.api.StatefulRedisConnection<String, String> connection,
+                                      String key, AtomicLong time) throws Exception {
+        // A failed in-flight control call can publish backoff after connectivity returns.
+        // Keep both clocks advancing until the barrier completes, while asserting that
+        // the entire handoff earns less than one additional global token (100 seconds).
+        await(() -> {
+            if (condition.getAsBoolean()) return true;
+            long next = time.get() + TimeUnit.MILLISECONDS.toNanos(50);
+            assertTrue(next < TimeUnit.SECONDS.toNanos(1090), "recovery exceeded the sub-token clock budget");
+            setNanos(connection, key, time, next);
+            return false;
+        });
     }
     private static RecoveryPrimary gated(RecoveryPrimary primary, AtomicBoolean online) {
         return (RecoveryPrimary) java.lang.reflect.Proxy.newProxyInstance(RecoveryPrimary.class.getClassLoader(), new Class<?>[]{RecoveryPrimary.class},
