@@ -42,11 +42,21 @@ class PinningControlTest {
                 PinningEvidence.classify("Native or VM frame on stack", List.of(cache, linker, "io.quotaflow.core.Entry#acquire")));
         assertEquals(PinningEvidence.Attribution.JVM_INITIALIZATION,
                 PinningEvidence.classify("Native or VM frame on stack", List.of(cache,
-                        "java.lang.invoke.DirectMethodHandle#preparedLambdaForm", "io.quotaflow.core.Entry#acquire")));
+                        "java.lang.invoke.DirectMethodHandle#preparedLambdaForm", linker, "io.quotaflow.core.Entry#acquire")));
+        assertEquals(PinningEvidence.Attribution.JVM_INITIALIZATION,
+                PinningEvidence.classify("Native or VM frame on stack", List.of("java.util.concurrent.ConcurrentHashMap#putVal",
+                        "jdk.internal.util.ReferencedKeyMap#internKey", "java.lang.invoke.MethodType#makeImpl", linker, "io.quotaflow.core.Entry#acquire")));
+        assertEquals(PinningEvidence.Attribution.JVM_INITIALIZATION,
+                PinningEvidence.classify("Native or VM frame on stack", List.of("java.lang.invoke.MethodTypeForm#setCachedMethodHandle",
+                        "java.lang.invoke.Invokers#basicInvoker", linker, "io.quotaflow.core.Entry#acquire")));
         assertEquals(PinningEvidence.Attribution.LIBRARY_BLOCKING,
                 PinningEvidence.classify("Native or VM frame on stack", List.of("java.lang.Thread#sleep", "io.quotaflow.core.Block#wait", cache, linker)));
         assertEquals(PinningEvidence.Attribution.LIBRARY_BLOCKING,
                 PinningEvidence.classify("Native or VM frame on stack", List.of(cache, "io.quotaflow.core.Block#wait", linker)));
+        assertEquals(PinningEvidence.Attribution.LIBRARY_BLOCKING,
+                PinningEvidence.classify("Native or VM frame on stack", List.of("java.util.concurrent.ConcurrentHashMap#putVal", "io.quotaflow.core.Cache#put", linker)));
+        assertEquals(PinningEvidence.Attribution.LIBRARY_BLOCKING,
+                PinningEvidence.classify("Native or VM frame on stack", List.of("java.lang.invoke.MethodTypeForm#setCachedMethodHandle", "io.quotaflow.core.Cache#put")));
         assertEquals(PinningEvidence.Attribution.LIBRARY_BLOCKING,
                 PinningEvidence.classify("unknown", List.of(cache, linker, "io.quotaflow.core.Entry#acquire")));
     }

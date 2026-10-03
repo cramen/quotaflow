@@ -63,7 +63,7 @@ the local facade and its real wait queue. JFR files and outcome/queue counts are
 retained under `build/reports/virtual-threads/`. Each scenario uses a fresh worker JVM, retains a 512-caller cold phase and a
 separate 100,000-caller warmed phase, and records phase times and process identity.
 Cold JVM loading/initialization events are retained and attributed from explicit
-JVM reasons, loader stacks, JVM-owned lambda/call-site linkage stacks or verified interpreted resolution instructions. A linkage classification requires the JVM lambda-cache frame at the top, a recognized linker before any application frame, and the explicit native/VM pin reason.
+JVM reasons, loader stacks, JVM-owned lambda/call-site linkage stacks or verified interpreted resolution instructions. A linkage classification requires an uninterrupted JVM-owned frame prefix from the blocking site to an explicit `MethodHandleNatives.link…` entry point, before any application frame, and the explicit native/VM pin reason. Application bootstrap code breaks this prefix and is not exempt.
 Library-owned and unattributed cold pinning fail; every warmed pinning event
 fails, including late class loading. Unknown events are never silently dropped.
 This certifies measured warmed paths and does not promise zero cold-start JVM

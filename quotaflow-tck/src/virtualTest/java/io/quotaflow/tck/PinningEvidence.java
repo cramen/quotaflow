@@ -44,11 +44,11 @@ final class PinningEvidence {
         // A class-loader frame elsewhere in a stack does not excuse blocking above it.
         boolean loader = false;
         boolean linkage = false;
-        boolean lambdaCache = frames.get(0).equals("java.lang.invoke.MethodTypeForm#setCachedLambdaForm");
         for (String frame : frames) {
             if (!(frame.startsWith("java.") || frame.startsWith("jdk.") || frame.startsWith("sun."))) break;
-            if (lambdaCache && (frame.startsWith("java.lang.invoke.MethodHandleNatives#linkCallSite")
-                    || frame.equals("java.lang.invoke.DirectMethodHandle#preparedLambdaForm"))) linkage = true;
+            // Only JVM-owned frames may lead from the blocking site to the VM's
+            // explicit linkage entry point. Application bootstrap code breaks this prefix.
+            if (frame.startsWith("java.lang.invoke.MethodHandleNatives#link")) linkage = true;
             if (frame.startsWith("jdk.internal.loader.BuiltinClassLoader#loadClass")
                     || frame.startsWith("java.lang.ClassLoader#loadClass")
                     || frame.startsWith("java.lang.ClassLoader#getClassLoadingLock")
