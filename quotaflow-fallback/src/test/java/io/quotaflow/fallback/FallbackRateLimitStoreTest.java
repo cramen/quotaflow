@@ -57,7 +57,8 @@ class FallbackRateLimitStoreTest {
             assertTrue(flow.tryAcquire("quota", RateLimitContext.empty(), 10).isAllowed());
             primary.available = true;
             time.addAndGet(TimeUnit.SECONDS.toNanos(1));
-            await(() -> store.state() == DegradationState.CLOSED);
+            // Publishing NORMAL and retiring its old ledger are separate recovery steps.
+            await(() -> store.state() == DegradationState.CLOSED && store.trackedBuckets() == 0);
             assertEquals(0, store.trackedBuckets());
             primary.available = false;
             assertFalse(flow.tryAcquire("quota", RateLimitContext.empty()).isAllowed());

@@ -20,7 +20,8 @@ def main():
         # A JDK 17 build has no virtualTest task; old reports from a different
         # runtime must not be copied into its evidence directory.
         for module in ROOT.glob("quotaflow-*"):
-            for relative in ("build/test-results", "build/reports/runtime", "build/reports/generated"):
+            for relative in ("build/test-results", "build/reports/runtime", "build/reports/generated",
+                             "build/reports/virtual-threads"):
                 shutil.rmtree(module / relative, ignore_errors=True)
         with (output / f"jdk{jdk}.log").open("w") as log:
             result = subprocess.run([str(ROOT / "gradlew"), "build", "dependencyAudit",
