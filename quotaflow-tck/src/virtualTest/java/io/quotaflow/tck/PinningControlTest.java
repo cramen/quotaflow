@@ -38,6 +38,16 @@ class PinningControlTest {
     @org.junit.jupiter.api.Test void onlyJvmOwnedCallSiteLinkageCanUseTheColdInitializationCategory() {
         String cache = "java.lang.invoke.MethodTypeForm#setCachedLambdaForm";
         String linker = "java.lang.invoke.MethodHandleNatives#linkCallSiteImpl";
+        String typeResolution = "java.lang.invoke.MethodHandleNatives#findMethodHandleType";
+        assertEquals(PinningEvidence.Attribution.JVM_INITIALIZATION,
+                PinningEvidence.classify("Native or VM frame on stack", List.of("java.util.concurrent.ConcurrentHashMap#putVal",
+                        "jdk.internal.util.ReferencedKeyMap#internKey", "java.lang.invoke.MethodType#methodType",
+                        typeResolution, "io.quotaflow.core.Entry#acquire")));
+        assertEquals(PinningEvidence.Attribution.LIBRARY_BLOCKING,
+                PinningEvidence.classify("Native or VM frame on stack", List.of("java.lang.Thread#sleep",
+                        "io.quotaflow.core.Block#wait", typeResolution)));
+        assertEquals(PinningEvidence.Attribution.LIBRARY_BLOCKING,
+                PinningEvidence.classify("unknown", List.of(cache, typeResolution, "io.quotaflow.core.Entry#acquire")));
         assertEquals(PinningEvidence.Attribution.JVM_INITIALIZATION,
                 PinningEvidence.classify("Native or VM frame on stack", List.of(cache, linker, "io.quotaflow.core.Entry#acquire")));
         assertEquals(PinningEvidence.Attribution.JVM_INITIALIZATION,

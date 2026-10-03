@@ -48,7 +48,8 @@ final class PinningEvidence {
             if (!(frame.startsWith("java.") || frame.startsWith("jdk.") || frame.startsWith("sun."))) break;
             // Only JVM-owned frames may lead from the blocking site to the VM's
             // explicit linkage entry point. Application bootstrap code breaks this prefix.
-            if (frame.startsWith("java.lang.invoke.MethodHandleNatives#link")) linkage = true;
+            if (frame.startsWith("java.lang.invoke.MethodHandleNatives#link")
+                    || frame.equals("java.lang.invoke.MethodHandleNatives#findMethodHandleType")) linkage = true;
             if (frame.startsWith("jdk.internal.loader.BuiltinClassLoader#loadClass")
                     || frame.startsWith("java.lang.ClassLoader#loadClass")
                     || frame.startsWith("java.lang.ClassLoader#getClassLoadingLock")
