@@ -38,6 +38,7 @@ final class ObservationDispatcher {
     }
     void retired(long generation) { send(4, session -> session.onRetired(generation)); }
     private CompletionStage<Void> send(int eventKind, Consumer<ObservationSession> callback) {
+        if (channels.isEmpty()) return CompletableFuture.completedFuture(null);
         return CompletableFuture.allOf(channels.stream().filter(channel -> (channel.kinds & eventKind) != 0)
                 .map(channel -> channel.send(callback)).toArray(CompletableFuture[]::new));
     }
