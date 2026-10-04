@@ -19,7 +19,7 @@ public class CertificationBenchmark {
     private final RateLimitContext context = RateLimitContext.builder().put(RateLimitContext.PRINCIPAL, "shared-child").build();
 
     @Setup public void setup() throws Exception {
-        var limit = new Limit(1_000_000_000, 1_000_000_000, Duration.ofSeconds(1));
+        var limit = new Limit(1_000_000_000, 1_000_000, Duration.ofSeconds(1));
         var policies = PolicySet.compile(List.of(
                 RateLimitPolicy.builder("provider").scope(io.quotaflow.core.Scope.GLOBAL).algorithm(algorithm).limit(limit).build(),
                 RateLimitPolicy.builder("child").scope(io.quotaflow.core.Scope.USER).parentId("provider").algorithm(algorithm).limit(limit).build()));
