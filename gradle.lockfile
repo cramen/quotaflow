@@ -1,0 +1,22 @@
+# This is a Gradle generated file for dependency locking.
+# Manual edits can break the build and are not advised.
+# This file is expected to be part of source control.
+com.ethlo.time:itu:1.14.0=releaseSbomValidator
+com.fasterxml.jackson.core:jackson-annotations:2.22=releaseSbomValidator
+com.fasterxml.jackson.core:jackson-core:2.22.1=releaseSbomValidator
+com.fasterxml.jackson.core:jackson-databind:2.22.1=releaseSbomValidator
+com.fasterxml.jackson.dataformat:jackson-dataformat-xml:2.22.1=releaseSbomValidator
+com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:2.18.4=releaseSbomValidator
+com.fasterxml.jackson:jackson-bom:2.22.1=releaseSbomValidator
+com.fasterxml.woodstox:woodstox-core:7.2.0=releaseSbomValidator
+com.github.package-url:packageurl-java:1.5.0=releaseSbomValidator
+com.networknt:json-schema-validator:2.0.4=releaseSbomValidator
+commons-codec:commons-codec:1.22.1=releaseSbomValidator
+commons-io:commons-io:2.22.0=releaseSbomValidator
+org.apache.commons:commons-collections4:4.5.0=releaseSbomValidator
+org.apache.commons:commons-lang3:3.20.0=releaseSbomValidator
+org.codehaus.woodstox:stax2-api:4.3.0=releaseSbomValidator
+org.cyclonedx:cyclonedx-core-java:13.1.0=releaseSbomValidator
+org.slf4j:slf4j-api:2.0.17=releaseSbomValidator
+org.yaml:snakeyaml:2.3=releaseSbomValidator
+empty=

@@ -1,20 +1,24 @@
 [versions]
 slf4j = "2.0.17"
 lettuce = "7.7.0.RELEASE"
-netty-legacy = "4.1.135.Final"
+netty-legacy = "4.1.137.Final"
+netty = "4.2.17.Final"
+log4j = "2.25.5"
 spring-boot = "3.5.16"
 kotlin = "2.2.21"
 kotlinx-coroutines = "1.10.2"
 junit = "5.11.4"
 testcontainers = "1.21.4"
 pitest-junit5 = "1.2.1"
-micrometer = "1.15.5"
+micrometer = "1.15.12"
 micrometer-tracing = "1.5.5"
 jackson = "2.19.2"
 
 [libraries]
 slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
 lettuce-core = { module = "io.lettuce:lettuce-core", version.ref = "lettuce" }
+netty-bom = { module = "io.netty:netty-bom", version.ref = "netty" }
+log4j-bom = { module = "org.apache.logging.log4j:log4j-bom", version.ref = "log4j" }
 # The netty 4.1 native-transport line (reactor-netty's): combined with the
 # netty 4.2 core Lettuce brings, it reproduces the incomplete-epoll classpath
 # mix the store client creation must tolerate.
@@ -43,3 +47,4 @@ graalvm-native = { id = "org.graalvm.buildtools.native", version = "1.1.14" }
 pitest = { id = "info.solidsoft.pitest", version = "1.19.0" }
 vanniktech-maven-publish = { id = "com.vanniktech.maven.publish", version = "0.37.0" }
 cyclonedx-bom = { id = "org.cyclonedx.bom", version = "3.4.1" }
+dokka = { id = "org.jetbrains.dokka", version = "2.2.0" }

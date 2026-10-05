@@ -21,11 +21,12 @@ jobs:
 
       - name: Refuse tags outside main
         run: |
-          git fetch origin main --depth=1
-          git merge-base --is-ancestor HEAD origin/main || {
-            echo "::error::Release tags must point at a commit on main."
-            exit 1
-          }
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
+            git fetch --unshallow origin
+          fi
+          python3 scripts/prepare_release.py validate-tag --tag "$GITHUB_REF_NAME" \
+            --expected-commit "$(git rev-parse "${GITHUB_SHA}^{commit}")"
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
@@ -96,6 +97,8 @@ jobs:
     env:
       CENTRAL_PORTAL_USERNAME: ${{ secrets.CENTRAL_PORTAL_USERNAME }}
       CENTRAL_PORTAL_TOKEN: ${{ secrets.CENTRAL_PORTAL_TOKEN }}
+      ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.CENTRAL_PORTAL_USERNAME }}
+      ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.CENTRAL_PORTAL_TOKEN }}
       SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
       SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
     steps:
@@ -116,6 +119,9 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Require effective publishing and signing credentials
+        run: python3 scripts/prepare_release.py check-credentials --scope all
+
       - name: Publish to Maven Central and create the GitHub Release
         if: env.CENTRAL_PORTAL_USERNAME != '' && env.SIGNING_KEY != ''
         env:
@@ -128,11 +134,3 @@ jobs:
           ./gradlew cyclonedxBom
           gh release create "$VERSION" --draft --generate-notes \
             $(find . -path "*/build/reports/cyclonedx/bom.json" | tr '\n' ' ')
-
-      - name: Notice when secrets are absent
-        if: env.CENTRAL_PORTAL_USERNAME == '' || env.SIGNING_KEY == ''
-        run: |
-          echo "::warning::Central Portal or signing secrets are not configured;" \
-            "verification ran but nothing was published. Configure" \
-            "CENTRAL_PORTAL_USERNAME/CENTRAL_PORTAL_TOKEN/SIGNING_KEY/SIGNING_PASSWORD" \
-            "as repository secrets to enable releases."

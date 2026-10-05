@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "tools": {
+    "grype": {
+      "version": "0.120.0",
+      "repository": "anchore/grype",
+      "platforms": {
+        "darwin-arm64": {
+          "url": "https://github.com/anchore/grype/releases/download/v0.120.0/grype_0.120.0_darwin_arm64.tar.gz",
+          "sha256": "d27d39ba25ba2d2a1d1568219ff159310d2cb54f3cdd5293e5820c5c784f7f11",
+          "format": "tar.gz",
+          "binary": "grype"
+        },
+        "linux-amd64": {
+          "url": "https://github.com/anchore/grype/releases/download/v0.120.0/grype_0.120.0_linux_amd64.tar.gz",
+          "sha256": "a5a1218dce63acdac152a6b3b5bb366e7267e36f4069848cf455543b3fa5700e",
+          "format": "tar.gz",
+          "binary": "grype"
+        },
+        "linux-arm64": {
+          "url": "https://github.com/anchore/grype/releases/download/v0.120.0/grype_0.120.0_linux_arm64.tar.gz",
+          "sha256": "bc0e52b1a0de37e2ff021c4924d689dce7dcff2e7d74b39aea16c0453e69be18",
+          "format": "tar.gz",
+          "binary": "grype"
+        }
+      }
+    },
+    "cosign": {
+      "version": "3.1.3",
+      "repository": "sigstore/cosign",
+      "platforms": {
+        "darwin-arm64": {
+          "url": "https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-darwin-arm64",
+          "sha256": "5cf948c2f4dfe59687bdd0b8523709067383e03982cc543475c8a7dc70e92a76",
+          "format": "binary",
+          "binary": "cosign"
+        },
+        "linux-amd64": {
+          "url": "https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-linux-amd64",
+          "sha256": "4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71",
+          "format": "binary",
+          "binary": "cosign"
+        },
+        "linux-arm64": {
+          "url": "https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-linux-arm64",
+          "sha256": "c5d324e091826b0d7a78eb16fef316450b4eb9aaec045611c08ba06f5e73220a",
+          "format": "binary",
+          "binary": "cosign"
+        }
+      }
+    }
+  }
+}

@@ -19,13 +19,14 @@ Fixes are released as soon as they are verified, not batched into feature releas
 
 ## Supported Versions
 
-- **JDK**: the last two LTS lines (currently 17 and 21; 25 is certified).
-- **Spring Boot**: the last two major lines (3.x and 4.x).
+- **JDK**: Java 17 bytecode baseline; certification targets JDK 17, 21 and 25, including the two latest LTS lines, 21 and 25.
+- **Spring Boot**: certification targets 4.1.1 and 4.0.8 (the two latest GA minor lines at the October 2026 review), plus the advertised 3.5.16 regression line. Support does not imply every patch in a major line has been tested.
+- **Evidence**: the completed quality-gate snapshot and its tested versions are recorded in [verification](docs/verification.md). Each release must supply fresh evidence for its own commit, version and artifact hashes; that snapshot does not certify a later candidate.
 - **Security backports**: fixes are backported to the latest minor release line for 12 months after its release.
 
 ## Supply Chain
 
 - Every release is published with a CycloneDX SBOM attached to the GitHub Release.
-- Release artifacts are PGP-signed; verify signatures against the project's public key.
-- Dependencies with known, reachable CVEs block a release.
+- Release artifacts require PGP signatures and a repository-bound Sigstore manifest; see [artifact verification](docs/artifact-verification.md). Production publication remains blocked until the approved public key and full fingerprint are configured and published.
+- Reachable vulnerabilities at any severity, unknown reachability, missing scans and stale security evidence block a release. Exact package/advisory exclusions require a reviewed rationale, supporting evidence, an owner and an expiry.
 - Secrets (tokens, keys, Redis passwords) are never logged at any level; limit keys never appear in logs above DEBUG or in metric tags.

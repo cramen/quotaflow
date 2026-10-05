@@ -11,6 +11,7 @@ plugins {
     alias(libs.plugins.vanniktech.maven.publish) apply false
     alias(libs.plugins.cyclonedx.bom) apply false
     alias(libs.plugins.kotlin.jvm) apply false
+    alias(libs.plugins.dokka) apply false
 }
 
 // Short public description of each published module, used in the POM.
@@ -98,14 +99,15 @@ subprojects {
             extensions.configure<MavenPublishBaseExtension> {
                 // Central Portal is the only supported upload path since the
                 // legacy OSSRH sunset (the plugin's default host). The release
-                // workflow runs the plugin's publishAndReleaseToMavenCentral
-                // task: one deployment for the whole build, so a release is
-                // all modules or none.
+                // promotion adapter uploads a previously verified immutable
+                // bundle; direct Gradle Central upload tasks are disabled.
                 publishToMavenCentral()
                 // Signing is required by Central for non-snapshot versions; the
                 // Sign tasks below additionally no-op unless key material is
                 // present, so local builds never need keys.
-                signAllPublications()
+                if (!providers.gradleProperty("releasePreparation").orElse("false").get().toBoolean()) {
+                    signAllPublications()
+                }
 
                 pom {
                     name.set("Quotaflow ${project.name.removePrefix("quotaflow-")}")
@@ -158,6 +160,8 @@ subprojects {
         }
     }
 }
+
+apply(from = "gradle/release-preparation.gradle")
 
 
 tasks.register("correctnessGate") {

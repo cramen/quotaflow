@@ -25,6 +25,7 @@ dependencies {
     testFixturesApi(project(":quotaflow-core"))
     testFixturesApi(libs.lettuce.core)
     api(libs.lettuce.core)
+    api(platform(libs.netty.bom))
 
     testImplementation(platform(libs.junit.bom))
     testImplementation(libs.junit.jupiter)
@@ -35,7 +36,12 @@ dependencies {
     // 4.2 core Lettuce resolves) for the native-transport guard tests. Classes
     // only — the jar carries no native library, so Epoll stays unavailable and
     // every client in this suite still runs on NIO.
-    testImplementation(libs.netty.transport.native.epoll.legacy)
+    testImplementation(libs.netty.transport.native.epoll.legacy) {
+        version { strictly(libs.versions.netty.legacy.get()) }
+    }
+    testImplementation("io.netty:netty-transport-classes-epoll") {
+        version { strictly(libs.versions.netty.legacy.get()) }
+    }
 
     jmhImplementation(libs.testcontainers)
 }

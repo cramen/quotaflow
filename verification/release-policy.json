@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "repository": "cramen/quotaflow",
+  "workflow": ".github/workflows/release.yml",
+  "oidcIssuer": "https://token.actions.githubusercontent.com",
+  "pgp": {
+    "publicKey": "security/release-public-key.asc",
+    "fingerprint": null
+  },
+  "vulnerabilities": {
+    "maximumDatabaseAgeHours": 24,
+    "maximumReportAgeHours": 24,
+    "maximumTriageDays": 30
+  }
+}

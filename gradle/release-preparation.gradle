@@ -1,0 +1,114 @@
+import groovy.json.JsonOutput
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
+import org.gradle.api.artifacts.component.ProjectComponentIdentifier
+import org.gradle.api.artifacts.result.ResolvedDependencyResult
+import java.security.MessageDigest
+
+def publicModules = ['quotaflow-core', 'quotaflow-store-redis', 'quotaflow-fallback', 'quotaflow-config',
+                     'quotaflow-spring-boot-starter', 'quotaflow-kotlin', 'quotaflow-micrometer']
+
+repositories { mavenCentral() }
+def sbomValidator = configurations.create('releaseSbomValidator') {
+    canBeConsumed = false
+    resolutionStrategy.activateDependencyLocking()
+}
+dependencyLocking { lockMode = LockMode.STRICT }
+dependencies.add(sbomValidator.name, 'org.cyclonedx:cyclonedx-core-java:13.1.0')
+
+tasks.register('writeProductionDependencyGraph') {
+    group = 'publishing'
+    description = 'Records only resolved production runtime components and their dependency edges.'
+    doLast {
+        def nodes = [:]
+        def edges = [:].withDefault { new TreeSet<String>() }
+        def reference = { id ->
+            if (id instanceof ModuleComponentIdentifier) return "${id.group}:${id.module}:${id.version}".toString()
+            if (id instanceof ProjectComponentIdentifier) {
+                def target = project(id.projectPath)
+                if (!publicModules.contains(target.name)) throw new GradleException('Internal module in production graph')
+                return "${target.group}:${target.name}:${target.version}".toString()
+            }
+            throw new GradleException('Unknown production component identity')
+        }
+        publicModules.each { name ->
+            def owner = project(":${name}")
+            def config = owner.configurations.getByName('runtimeClasspath')
+            def artifacts = config.incoming.artifactView { }.artifacts.artifacts
+            artifacts.each { artifact ->
+                def id = artifact.variant.owner
+                if (id instanceof ModuleComponentIdentifier) {
+                    def ref = reference(id)
+                    def node = nodes.computeIfAbsent(ref) { [group: id.group, name: id.module, version: id.version, artifacts: []] }
+                    def hash = MessageDigest.getInstance('SHA-256').digest(artifact.file.bytes).encodeHex().toString()
+                    def item = [filename: artifact.file.name, sha256: hash]
+                    if (!node.artifacts.contains(item)) node.artifacts.add(item)
+                }
+            }
+            def resolution = config.incoming.resolutionResult
+            resolution.allComponents.each { component ->
+                if (component.id instanceof ProjectComponentIdentifier) {
+                    def target = project(component.id.projectPath)
+                    nodes[reference(component.id)] = [group: target.group.toString(), name: target.name,
+                                                     version: target.version.toString(), artifacts: []]
+                }
+            }
+            resolution.allComponents.each { component ->
+                def from = reference(component.id)
+                if (nodes.containsKey(from)) {
+                    component.dependencies.each { dependency ->
+                        if (!(dependency instanceof ResolvedDependencyResult)) throw new GradleException('Unresolved production dependency')
+                        if (!dependency.constraint) {
+                            def to = reference(dependency.selected.id)
+                            if (nodes.containsKey(to)) edges[from].add(to)
+                        }
+                    }
+                }
+            }
+        }
+        def output = rootProject.file(providers.gradleProperty('productionGraphOutput')
+                .orElse('build/release/production-graph.json').get())
+        output.parentFile.mkdirs()
+        output.text = JsonOutput.prettyPrint(JsonOutput.toJson([schemaVersion: 1,
+            version: project(':quotaflow-core').version.toString(), modules: publicModules,
+            components: nodes.sort(), dependencies: edges.sort()])) + '\n'
+    }
+}
+
+tasks.register('validateReleaseSbom') {
+    group = 'verification'
+    description = 'Validates the aggregate release SBOM against the pinned CycloneDX schema implementation.'
+    doLast {
+        def input = rootProject.file(providers.gradleProperty('releaseSbomInput').get())
+        def validatorHash
+        new URLClassLoader(sbomValidator.files.collect { it.toURI().toURL() } as URL[], ClassLoader.platformClassLoader).withCloseable { loader ->
+            def parserType = loader.loadClass('org.cyclonedx.parsers.JsonParser')
+            def versionType = loader.loadClass('org.cyclonedx.Version')
+            def version = versionType.enumConstants.find { it.name() == 'VERSION_16' }
+            def errors = parserType.getMethod('validate', File, versionType).invoke(parserType.getConstructor().newInstance(), input, version)
+            if (!errors.isEmpty()) throw new GradleException('Invalid CycloneDX release SBOM: ' + errors.collect { it.message }.join('; '))
+            validatorHash = MessageDigest.getInstance('SHA-256').digest(parserType.getResourceAsStream('JsonParser.class').bytes).encodeHex().toString()
+        }
+        def report = rootProject.file(providers.gradleProperty('releaseSbomValidationOutput').get())
+        report.parentFile.mkdirs()
+        report.text = JsonOutput.prettyPrint(JsonOutput.toJson([schemaVersion: 1, status: 'PASS',
+            schema: 'CycloneDX 1.6', sbomSha256: MessageDigest.getInstance('SHA-256').digest(input.bytes).encodeHex().toString(),
+            validator: 'org.cyclonedx:cyclonedx-core-java:13.1.0', validatorClassSha256: validatorHash])) + '\n'
+    }
+}
+
+gradle.taskGraph.whenReady { graph ->
+    if (graph.allTasks.any { it.name.toLowerCase().contains('mavencentral') }) {
+        throw new GradleException('Direct Gradle Central upload is disabled; promote a verified immutable bundle through the release adapter.')
+    }
+    if (providers.gradleProperty('releasePreparation').orElse('false').get() == 'true') {
+        graph.allTasks.each { task ->
+            if (task instanceof org.gradle.api.publish.maven.tasks.PublishToMavenLocal) {
+                throw new GradleException('Candidate preparation cannot publish to Maven local')
+            }
+            if (task instanceof org.gradle.api.publish.maven.tasks.PublishToMavenRepository &&
+                    (task.repository.name != 'Verification' || task.repository.url.scheme != 'file')) {
+                throw new GradleException('Candidate preparation can write only its local verification repository')
+            }
+        }
+    }
+}

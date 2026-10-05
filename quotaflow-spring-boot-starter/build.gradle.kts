@@ -38,6 +38,7 @@ dependencies {
 
     // Exposed so consumers resolve aligned Spring versions for the api deps below.
     api(platform(libs.spring.boot.dependencies))
+    api(platform(libs.log4j.bom))
 
     // Plain Spring AOP (no AspectJ weaver): the auto-configuration registers
     // the infrastructure auto-proxy creator itself, so @RateLimited works in
@@ -61,6 +62,14 @@ dependencies {
     testImplementation("org.springframework.boot:spring-boot-starter-web")
     testImplementation("org.springframework.boot:spring-boot-starter-webflux")
     testImplementation("org.springframework.security:spring-security-core")
+    // Keep the intentional partial-native-stack fixture independent of the
+    // production Netty BOM alignment and its security updates.
+    testImplementation(libs.netty.transport.native.epoll.legacy) {
+        version { strictly(libs.versions.netty.legacy.get()) }
+    }
+    testImplementation("io.netty:netty-transport-classes-epoll") {
+        version { strictly(libs.versions.netty.legacy.get()) }
+    }
     testRuntimeOnly(libs.junit.platform.launcher)
 }
 
