@@ -255,3 +255,28 @@ these suites sequentially on one host. Redis/Valkey containers are disposable.
 A 60-second soak is useful for harness diagnostics but reports DIAGNOSTIC and
 cannot satisfy release acceptance. Ordinary `build` includes topology checks and
 excludes the one-hour soak; nightly runs retain its latency and recovery report.
+
+## Recorded implementation verification
+
+The completed quality-gate implementation was verified at commit
+`4cf50f0856d9672cb3dbd2a9c8c7208f60057ad1`, version `0.1.0-SNAPSHOT`.
+All 16 required evidence stages passed: actual-worker JDK 17/21/25 checks,
+coverage, independent core/fallback mutation gates, Redis/Valkey topologies,
+36 external consumer combinations, three native workloads, the one-hour soak,
+reproducibility, negative controls and comparative performance.
+
+The reviewed local Docker Desktop profile passed all 12 performance metrics
+with three complete runs per version and a maximum upper regression bound of
+8.44%. Earlier native-host measurements remain inconclusive and are retained
+separately. Benchmarks were not executed in GitHub.
+
+The local evidence directory is `build/reports/release-candidate-4cf50f0/`.
+Its `publishing-handoff.json` identifies the verified candidate and archive:
+
+- Verification manifest SHA-256: `c36405e2a81d1c2d640ec83d18fd0f665d8f456f37c1eae0d89e1b54576b381d`.
+- Evidence ZIP SHA-256: `624636c69ea678863e62ce87f55bc6de3af760e0d08699f9ef136e02c17b1f68`.
+- Baseline review SHA-256: `80ddb6e28a9f53dcadd6c649b60efdcb68b15552539385898dc14fdfe243718b`.
+
+This records verification of that snapshot, not publication authorization.
+A different commit, release version, source tree or artifact set requires
+matching fresh evidence, plus the release security and signing gates.
