@@ -66,7 +66,8 @@ does not verify a different JAR downloaded later.
 ## Security evidence
 
 The production CycloneDX SBOM is scanned with a digest-pinned Grype executable.
-The report retains the database, its hash and build timestamp, the raw finding
+The report retains the complete database in lossless gzip form, both compressed
+and original SHA-256 hashes, original size and build timestamp, the raw finding
 set and the reachability review. The database and report must be no older than
 24 hours at promotion. Scanner failure is not an empty finding set.
 

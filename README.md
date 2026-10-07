@@ -23,12 +23,26 @@ Enterprise-grade **distributed rate limiting library for JVM microservices** —
 
 ## Quick Start (Spring Boot)
 
+Use the [tested consumer dependency alignment](docs/consumer-compatibility.md)
+for your Boot line; an application-owned BOM can override the starter's transitive
+versions. Release certification checks the resolved runtime, not only this coordinate.
+
 ```groovy
-implementation "io.quotaflow:quotaflow-spring-boot-starter:0.1.0"
+dependencies {
+    implementation "io.quotaflow:quotaflow-spring-boot-starter:0.1.0"
+}
+tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs.add("-parameters")
+}
 ```
 
 ```properties
 quotaflow.redis.url=redis://localhost:6379
+quotaflow.namespace=default
+quotaflow.defaults.expected-instances=1
+quotaflow.recovery.deployment-id=default
+quotaflow.recovery.members=single
+quotaflow.recovery.instance-id=single
 
 quotaflow.policies.llm-provider.scope=global
 quotaflow.policies.llm-provider.limit.capacity=10000
@@ -47,6 +61,11 @@ quotaflow.policies.tenant-gold.limit.refill-period=PT1M
 public CompletionStage<Answer> chat(String tenantId, Prompt prompt) { ... }
 ```
 
+Named expressions such as `#tenantId` require Java parameter metadata. For Maven,
+set `maven.compiler.parameters=true`; alternatively use positional expressions
+such as `#p0`. The explicit single-owner settings above must be replaced with
+the complete stable cohort before running multiple instances.
+
 Provision the namespace, fixed cohort and root controllers before activation; see
 [conservative recovery and the single-owner setup](docs/conservative-recovery.md).
 For deadline, cancellation and resolver execution settings, see
@@ -54,11 +73,20 @@ For deadline, cancellation and resolver execution settings, see
 
 An exhausted limit produces `429 Too Many Requests` with a `Retry-After`
 header and an `application/problem+json` body naming the policy and the fired
-level. Throttle-mode policies instead queue callers with backpressure:
+level. To queue callers with backpressure, select throttle mode on the policy
+and set the annotation's waiting budget:
+
+```properties
+quotaflow.policies.tenant-gold.reaction=throttle
+```
 
 ```java
 @RateLimited(policy = "tenant-gold", key = "#tenantId", waitTimeout = "PT2S")
 ```
+
+For ordinary Java methods the annotation waits synchronously, including when the
+business method returns `CompletionStage`. Use the supported Reactor return types
+for WebFlux or the Kotlin suspend facade when acquisition must remain nonblocking.
 
 Non-Spring applications use `io.quotaflow:quotaflow-core` plus a store module
 (`quotaflow-store-redis`) with the `quotaflow-fallback` coordinator; coroutine applications use

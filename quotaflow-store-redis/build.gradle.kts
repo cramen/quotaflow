@@ -26,6 +26,13 @@ dependencies {
     testFixturesApi(libs.lettuce.core)
     api(libs.lettuce.core)
     api(platform(libs.netty.bom))
+    // A dependency's imported BOM does not control another dependency's
+    // transitive tree in Maven consumers. Direct entries select the reviewed
+    // stack at a nearer depth, even when the application imports no Netty BOM.
+    api("io.netty:netty-handler")
+    api("io.netty:netty-common")
+    api("io.netty:netty-transport")
+    api("io.netty:netty-resolver-dns")
 
     testImplementation(platform(libs.junit.bom))
     testImplementation(libs.junit.jupiter)

@@ -119,6 +119,8 @@ def verify_pgp(candidate_root, report, manifest, expected, production=True):
         import_public(home, public_key, expected)
         for entry in report["signedAssets"]:
             require(entry["artifact"] == expected_assets[entry["artifact"]["path"]], "Changed signed Maven asset")
+            require(entry["signature"]["path"] == entry["artifact"]["path"] + ".asc",
+                    "PGP signature is not the required Maven sidecar")
             verify_in_home(home, safe_artifact(root, entry["artifact"]), safe_artifact(root, entry["signature"]), expected)
 
 

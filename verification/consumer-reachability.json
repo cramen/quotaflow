@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "reviews": [
+    {
+      "advisory": "GHSA-pc63-qcmh-9cmg",
+      "purl": "pkg:maven/org.springframework/spring-webmvc@6.2.19",
+      "context": "quotaflow-fixed-rest-consumer-fixtures",
+      "candidateArtifactsSha256": "f92194921bd0822f2f52bf3e5adb933af450b6e510faf991e43c026a48de4550",
+      "decision": "not_reachable",
+      "owner": "Quotaflow automated fixture review",
+      "reviewedAt": "2026-10-07T04:21:19.067443+00:00",
+      "expiresAt": "2026-10-14T04:21:19.067443+00:00",
+      "rationale": "Only the fixed REST compatibility fixtures qualify. Runtime assertions reject XsltView beans, XSLT-capable or unreviewed resolvers and wildcard controller mappings. A real XsltView negative control must fail. This review never covers arbitrary applications or the library production scan.",
+      "evidence": [
+        {
+          "path": "verification/consumer-xslt-review.md",
+          "sha256": "62aa29e0e73007ceb63c6085be4616b29c5a394bfa2d2dea0def193fd697edc4"
+        },
+        {
+          "path": "verification/published/common/ConsumerViewSafety.java",
+          "sha256": "09c966118db8daacc1ed58c50f9fc2fce0134a235628df6a829fe434ec1d465f"
+        },
+        {
+          "path": "verification/consumer/src/main/java/io/quotaflow/verification/consumer/CompatibilityApplication.java",
+          "sha256": "0917f7831b314d817a7c056b8b5939f36beadf2f703902b3a6749a9609cc2e73"
+        },
+        {
+          "path": "scripts/consumer_security.py",
+          "sha256": "ebfb02142984bb6cc4b4b331b0b11586da713e017ff0e0a77dd15b72c8c82e95"
+        },
+        {
+          "path": "scripts/run_staged_verification.py",
+          "sha256": "d36b691e58c16923b83561ce6bff0a5439ac4500b89683c22de22e9033d63083"
+        },
+        {
+          "path": "verification/consumer-runtime.json",
+          "sha256": "da8c46e47f4dbb4c35fa8fcc6cac553cf93c4c7548ba37816f1db4d5cc4124b9"
+        },
+        {
+          "path": "verification/published/common/ConsumerRecovery.java",
+          "sha256": "3dcbcecc811173dd0d12fdfbe297a7716b14fee25edb6ed508e206d50e154f3a"
+        }
+      ]
+    }
+  ]
+}

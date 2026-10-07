@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 from release_common import sha256
-from scan_release import artifact_set, evaluate
+from scan_release import artifact_set, evaluate, retain_database, verify_database
 
 
 class SecurityGateTest(unittest.TestCase):
@@ -84,6 +84,28 @@ class SecurityGateTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "filtering"): self.gate()
         self.raw["descriptor"]["configuration"] = {}; self.raw["descriptor"]["timestamp"] = (self.now - dt.timedelta(days=2)).isoformat()
         with self.assertRaisesRegex(ValueError, "Stale"): self.gate()
+
+
+class DatabaseRetentionTest(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup);self.root=Path(self.temp.name)
+        self.source=self.root/'source.db';self.source.write_bytes(b'complete database bytes\x00'*10000)
+    def test_lossless_deterministic_retention_and_original_digest(self):
+        first=retain_database(self.source,self.root/'first.gz',sha256(self.source))
+        second=retain_database(self.source,self.root/'second.gz',sha256(self.source))
+        self.assertEqual(first['sha256'],second['sha256'])
+        self.assertEqual(sha256(self.source),first['uncompressedSha256'])
+        verify_database(self.root,first)
+    def test_wrong_input_content_hash_and_expansion_bound_fail(self):
+        with self.assertRaisesRegex(ValueError,'changed during retention'):
+            retain_database(self.source,self.root/'wrong.gz','0'*64)
+        ref=retain_database(self.source,self.root/'valid.gz',sha256(self.source));ref['uncompressedSize']=1
+        with self.assertRaisesRegex(ValueError,'declared size'):verify_database(self.root,ref)
+    def test_tampered_compressed_or_original_identity_fails(self):
+        ref=retain_database(self.source,self.root/'valid.gz',sha256(self.source));ref['uncompressedSha256']='0'*64
+        with self.assertRaisesRegex(ValueError,'scanned bytes'):verify_database(self.root,ref)
+        (self.root/'valid.gz').write_bytes(b'changed')
+        with self.assertRaisesRegex(ValueError,'digest'):verify_database(self.root,ref)
 
 
 if __name__ == "__main__":

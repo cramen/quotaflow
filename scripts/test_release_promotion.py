@@ -36,7 +36,8 @@ class Portal:
     def __init__(self):
         self.uploads = 0; self.promotions = 0; self.files = {}; self.state = 'VALIDATED'
         self.lose_upload = False; self.lose_promote = False; self.corrupt = False
-    def upload(self, bundle, name):
+    def upload(self, bundle, name, expected_sha256):
+        if sha256(bundle) != expected_sha256: raise ValueError('Changed upload bytes')
         self.uploads += 1
         with zipfile.ZipFile(bundle) as archive: self.files = {name: archive.read(name) for name in archive.namelist()}
         if self.lose_upload: raise OSError('lost upload response')

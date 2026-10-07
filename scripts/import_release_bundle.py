@@ -13,7 +13,7 @@ from verify_performance_bundle import require
 MAX_BYTES = 2 * 1024 * 1024 * 1024
 
 
-def extract(archive, output):
+def extract(archive, output, require_manifest=True):
     with zipfile.ZipFile(archive) as source:
         entries = source.infolist()
         require(sum(e.file_size for e in entries) <= MAX_BYTES, "Evidence archive exceeds size limit")
@@ -31,7 +31,7 @@ def extract(archive, output):
             else:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with source.open(entry) as reader, target.open("wb") as writer: shutil.copyfileobj(reader, writer)
-    require((output / "manifest.json").is_file(), "Evidence manifest must be at archive root")
+    if require_manifest: require((output / "manifest.json").is_file(), "Evidence manifest must be at archive root")
 
 
 def main():
@@ -39,6 +39,7 @@ def main():
     parser.add_argument("--url", required=True)
     parser.add_argument("--sha256", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--archive-output", type=Path, help="Retain the original digest-pinned ZIP for candidate sealing")
     args = parser.parse_args()
     require(args.url.startswith("https://"), "An HTTPS evidence URL is required")
     require(len(args.sha256) == 64 and all(c in "0123456789abcdef" for c in args.sha256), "An explicit archive SHA-256 is required")
@@ -51,6 +52,10 @@ def main():
                 archive.write(chunk); sha.update(chunk)
         require(sha.hexdigest() == args.sha256, "Evidence archive digest mismatch")
         archive.seek(0); extract(archive, args.output)
+        if args.archive_output is not None:
+            args.archive_output.parent.mkdir(parents=True, exist_ok=True)
+            archive.seek(0)
+            with args.archive_output.open("xb") as target: shutil.copyfileobj(archive, target)
 
 
 if __name__ == "__main__":

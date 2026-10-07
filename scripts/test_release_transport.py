@@ -23,7 +23,7 @@ class TransportTest(unittest.TestCase):
             portal = Portal({'CENTRAL_PORTAL_USERNAME': 'dummy-user', 'CENTRAL_PORTAL_TOKEN': 'dummy-token'})
             deployment = '28570f16-da32-4c14-bd2e-c1acc0782365'
             with patch('release_transport.request', return_value=deployment.encode()) as wire:
-                self.assertEqual(deployment, portal.upload(bundle, 'quotaflow-1.0.0'))
+                self.assertEqual(deployment, portal.upload(bundle, 'quotaflow-1.0.0', hashlib.sha256(bundle.read_bytes()).hexdigest()))
                 args = wire.call_args.args
                 self.assertEqual('POST', args[0]); self.assertIn('publishingType=USER_MANAGED', args[1])
                 self.assertNotIn('AUTOMATIC', args[1]); self.assertIn(b'name="bundle"', args[3])
@@ -46,6 +46,14 @@ class TransportTest(unittest.TestCase):
             with self.assertRaises(ValueError): portal.download('id', '../secret')
             with self.assertRaises(ValueError): portal.status('../other')
             wire.assert_not_called()
+
+    def test_changed_upload_payload_never_reaches_http(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'candidate.zip'; path.write_bytes(b'changed')
+            portal=Portal({'CENTRAL_PORTAL_USERNAME':'dummy','CENTRAL_PORTAL_TOKEN':'dummy'})
+            with patch('release_transport.request') as wire:
+                with self.assertRaisesRegex(ValueError,'changed before upload'): portal.upload(path,'candidate','0'*64)
+                wire.assert_not_called()
 
     def test_new_process_loads_the_same_durable_deployment_identity(self):
         github = DraftGitHub(); journal = GitHubJournal(github, 'v1.0.0')

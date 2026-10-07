@@ -64,6 +64,14 @@ class PgpTest(unittest.TestCase):
         Path(str(self.jar) + ".asc").write_text("corrupted")
         with self.assertRaises(ValueError): self.sign()
 
+    def test_valid_signature_at_another_path_cannot_replace_required_sidecar(self):
+        report=self.sign()
+        original=self.root/report['signedAssets'][0]['signature']['path']
+        renamed=self.root/'renamed.asc'; renamed.write_bytes(original.read_bytes())
+        report['signedAssets'][0]['signature']['path']='renamed.asc'
+        with self.assertRaisesRegex(ValueError,'required Maven sidecar'):
+            verify_pgp(self.root,report,self.manifest,self.identity,production=False)
+
 
 class SigstoreBoundaryTest(unittest.TestCase):
     def setUp(self):

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "reviewedAt": "2026-10-07",
+  "scope": "Explicit security alignment for certified external consumer fixtures; applications must scan their own complete runtime.",
+  "boms": [
+    {"group": "io.netty", "artifact": "netty-bom", "version": "4.2.17.Final"},
+    {"group": "org.apache.logging.log4j", "artifact": "log4j-bom", "version": "2.25.5"},
+    {"group": "com.fasterxml.jackson", "artifact": "jackson-bom", "version": "2.21.7"},
+    {"group": "tools.jackson", "artifact": "jackson-bom", "version": "3.1.7"}
+  ],
+  "tomcat": {"3.5.16": "10.1.60", "4.0.8": "11.0.26", "4.1.1": "11.0.26"},
+  "tomcatArtifacts": ["tomcat-embed-core", "tomcat-embed-el", "tomcat-embed-websocket"],
+  "evidence": "The initial 60-run runtime union reported 49 package/advisory matches under build/release-publishing-work/runtime-diagnostic/runtime-security. Fix availability was checked against Maven Central metadata. No finding is waived by this configuration."
+}

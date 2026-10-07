@@ -1,0 +1,45 @@
+"""Fixture-only reachability cannot become a blanket vulnerability exclusion."""
+import copy
+import json
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+from consumer_security import ADVISORY, PACKAGE, CONTEXT, scoped_reviews
+from release_common import sha256
+from scan_release import artifact_set
+
+
+class ConsumerReviewTest(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup);self.root=Path(self.temp.name)
+        (self.root/'verification').mkdir(); proof=self.root/'guard.java';proof.write_text('fixed guard source')
+        self.candidate={'artifacts':{'core.jar':'a'*64}}
+        self.document={'schemaVersion':1,'reviews':[{'advisory':ADVISORY,'purl':PACKAGE,'context':CONTEXT,'decision':'not_reachable',
+                         'candidateArtifactsSha256':artifact_set(self.candidate),'evidence':[{'path':'guard.java','sha256':sha256(proof)}]}]}
+        self.runs=[{'id':'starter-3.5.16-servlet-maven-jdk17','runtime':[{'purl':PACKAGE}]}]
+        self.log='CONSUMER VIEW SAFETY VERIFIED xsltBeans=0 wildcardViewMappings=0\nCONSUMER VIEW SAFETY NEGATIVE CONTROL PASSED\n'
+        root=patch('consumer_security.ROOT',self.root);root.start();self.addCleanup(root.stop)
+    def check(self):
+        (self.root/'verification/consumer-reachability.json').write_text(json.dumps(self.document))
+        return scoped_reviews(self.candidate,self.runs,lambda run:self.log)
+    def test_exact_fixed_fixture_with_both_runtime_controls_qualifies(self):
+        self.assertEqual(self.document,self.check())
+    def test_advisory_version_context_and_binary_mismatch_fail(self):
+        for key in ('advisory','purl','context','candidateArtifactsSha256'):
+            original=copy.deepcopy(self.document);self.document['reviews'][0][key]='other'
+            with self.subTest(key=key),self.assertRaises(ValueError):self.check()
+            self.document=original
+    def test_missing_proof_or_changed_guard_fails(self):
+        self.log='CONSUMER VIEW SAFETY VERIFIED xsltBeans=0 wildcardViewMappings=0\n'
+        with self.assertRaisesRegex(ValueError,'executable'):self.check()
+        (self.root/'guard.java').write_text('changed guard')
+        with self.assertRaisesRegex(ValueError,'digest'):self.check()
+    def test_unreviewed_application_or_package_is_never_waived(self):
+        self.runs[0]['id']='application-production'
+        with self.assertRaisesRegex(ValueError,'application context'):self.check()
+        self.runs[0]['runtime'][0]['purl']='pkg:maven/org.springframework/spring-webmvc@7.0.8'
+        with self.assertRaisesRegex(ValueError,'does not apply'):self.check()
+
+
+if __name__=='__main__':unittest.main()

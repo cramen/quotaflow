@@ -1,136 +1,281 @@
 name: Release
 
-on:
+'on':
   push:
-    tags:
-      - 'v*'
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Prepare a new candidate or resume preserved signed bytes (select the release tag)
+        type: choice
+        options: [prepare, resume]
+        default: prepare
+      candidate_run_id:
+        description: Original workflow run ID (resume only)
+        type: string
+      signed_artifact_id:
+        description: Preserved signed-candidate artifact ID (resume only)
+        type: string
+      manifest_sha256:
+        description: Independently retained signed-manifest SHA-256 (resume only)
+        type: string
+      transfer_sha256:
+        description: Independently retained signed transfer ZIP SHA-256 (resume only)
+        type: string
+      recovered_deployment:
+        description: Existing Portal deployment ID after an uncertain upload
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quotaflow-release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  # Performance certification must not silently fall back to diagnostic mode.
-  # Benchmarks run locally; GitHub accepts only an independently pinned evidence bundle.
-  verify:
-    runs-on: ubuntu-latest
+  prepare:
+    if: ${{ inputs.operation != 'resume' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      transfer_sha256: ${{ steps.transfer.outputs.sha256 }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-
-      - name: Validate Gradle wrapper
-        uses: gradle/actions/wrapper-validation@v4
-
-      - name: Refuse tags outside main
+          persist-credentials: false
+      - uses: gradle/actions/wrapper-validation@ed408507eac070d1f99cc633dbcf757c94c7933a # v4.4.3
+      - name: Validate exact tag and full main ancestry
         run: |
+          test "$GITHUB_REF_TYPE" = tag
           git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
-          if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
-            git fetch --unshallow origin
-          fi
-          python3 scripts/prepare_release.py validate-tag --tag "$GITHUB_REF_NAME" \
-            --expected-commit "$(git rev-parse "${GITHUB_SHA}^{commit}")"
-
-      - name: Set up JDK 21
-        uses: actions/setup-java@v4
+          python3 scripts/prepare_release.py validate-tag --tag "$GITHUB_REF_NAME" --expected-commit "$(git rev-parse HEAD)"
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
           java-version: |
             17
             21
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Build, test, and audit
+            25
+      - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4.4.3
+      - name: Build candidate and verify the dependency supply chain
         run: |
           ./gradlew build dependencyAudit -PtestJdk=21 -Pversion="${GITHUB_REF_NAME#v}"
-          ./gradlew correctnessGate -PtestJdk=17 -Pversion="${GITHUB_REF_NAME#v}"
-
-      - name: Verify evidence validator negative controls
+          python3 scripts/prepare_release.py prepare --version "${GITHUB_REF_NAME#v}" --tag "$GITHUB_REF_NAME" --output build/release/prepared
+      - name: Run publishing negative controls
         run: |
-          python3 scripts/test_quality_thresholds.py
-          python3 scripts/test_performance_bundle.py
-          python3 scripts/test_release_evidence.py
-          python3 scripts/test_evidence_collection.py
-
-      - name: Capture exact candidate identity
-        shell: bash
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          artifacts=()
-          for module in core store-redis fallback config spring-boot-starter kotlin micrometer; do
-            artifacts+=("quotaflow-$module/build/libs/quotaflow-$module-$version.jar")
-          done
-          python3 scripts/candidate_identity.py --version "$version" \
-            --artifacts "${artifacts[@]}" --output build/release-candidate.json
-
-      - name: Import pinned local verification evidence
+          python3 scripts/test_release_candidate.py
+          python3 scripts/test_release_acceptance.py
+          python3 scripts/test_release_evidence_gate.py
+          python3 scripts/test_release_promotion.py
+          python3 scripts/test_release_transport.py
+          python3 scripts/test_release_rehearsal.py
+          python3 scripts/test_release_workflow.py
+      - name: Import independently pinned local quality evidence (no benchmarks in GitHub)
         env:
           EVIDENCE_URL: ${{ vars.QUOTAFLOW_RELEASE_EVIDENCE_URL }}
           EVIDENCE_SHA256: ${{ vars.QUOTAFLOW_RELEASE_EVIDENCE_SHA256 }}
           MANIFEST_SHA256: ${{ vars.QUOTAFLOW_RELEASE_MANIFEST_SHA256 }}
           BASELINE_SHA256: ${{ vars.QUOTAFLOW_BASELINE_REVIEW_SHA256 }}
         run: |
-          python3 scripts/import_release_bundle.py --url "$EVIDENCE_URL" \
-            --sha256 "$EVIDENCE_SHA256" --output build/imported-release-evidence
-          python3 scripts/verify_release_evidence.py build/imported-release-evidence \
-            --sha256 "$MANIFEST_SHA256" --candidate build/release-candidate.json \
-            --baseline-review-sha256 "$BASELINE_SHA256" > build/release-acceptance.json
-
-      - name: Retain verification diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
+          python3 scripts/import_release_bundle.py --url "$EVIDENCE_URL" --sha256 "$EVIDENCE_SHA256" --output build/imported-quality --archive-output build/release/reports/quality/verification.zip
+          python3 scripts/verify_release_evidence.py build/imported-quality --sha256 "$MANIFEST_SHA256" --candidate build/release/prepared/candidate.json --baseline-review-sha256 "$BASELINE_SHA256" > build/quality-acceptance.json
+      - name: Execute staged consumers and README examples
+        run: |
+          python3 scripts/run_staged_verification.py --prepared build/release/prepared --output build/release/reports --work build/staged-work --java-home "17=$JAVA_HOME_17_X64" --java-home "21=$JAVA_HOME_21_X64" --java-home "25=$JAVA_HOME_25_X64"
+      - name: Scan the exact production SBOM with pinned tooling and current database
+        run: |
+          python3 scripts/release_tools.py grype --install
+          python3 scripts/scan_release.py --candidate build/release/prepared --output build/release/reports/security --refresh
+      - name: Seal preparation transfer
+        id: transfer
+        run: |
+          digest="$(python3 scripts/release_transfer.py pack --source build/release --archive build/prepared-transfer.zip)"
+          echo "sha256=$digest" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        id: upload
         with:
-          name: release-verification
+          name: prepared-candidate-${{ github.run_attempt }}
+          path: build/prepared-transfer.zip
+          if-no-files-found: error
+          retention-days: 30
+      - name: Retain failed preparation diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: preparation-diagnostics-${{ github.run_attempt }}
           path: |
-            **/build/reports/**
-            **/build/test-results/**
-            build/release-candidate*.json
-            build/release-acceptance.json
+            build/release
+            build/staged-work/logs
+            **/build/test-results
+          if-no-files-found: warn
 
-  # Publishes all modules in one Central deployment (all-or-none), signs with
-  # the project's PGP key, and drafts the GitHub Release with the SBOM.
-  # Required secrets (never stored in the repo):
-  #   CENTRAL_PORTAL_USERNAME / CENTRAL_PORTAL_TOKEN — Central Portal account
-  #   SIGNING_KEY — armored PGP private key; SIGNING_PASSWORD — its passphrase
-  publish:
-    needs: verify
-    runs-on: ubuntu-latest
-    env:
-      CENTRAL_PORTAL_USERNAME: ${{ secrets.CENTRAL_PORTAL_USERNAME }}
-      CENTRAL_PORTAL_TOKEN: ${{ secrets.CENTRAL_PORTAL_TOKEN }}
-      ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.CENTRAL_PORTAL_USERNAME }}
-      ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.CENTRAL_PORTAL_TOKEN }}
-      SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
-      SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+  sign:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    environment: release-signing
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      manifest_sha256: ${{ steps.identity.outputs.manifest_sha256 }}
+      transfer_sha256: ${{ steps.transfer.outputs.sha256 }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Validate Gradle wrapper
-        uses: gradle/actions/wrapper-validation@v4
-
-      - name: Set up JDK 21
-        uses: actions/setup-java@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          distribution: temurin
-          java-version: |
-            17
-            21
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Require effective publishing and signing credentials
-        run: python3 scripts/prepare_release.py check-credentials --scope all
-
-      - name: Publish to Maven Central and create the GitHub Release
-        if: env.CENTRAL_PORTAL_USERNAME != '' && env.SIGNING_KEY != ''
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ needs.prepare.outputs.artifact_id }}
+          merge-multiple: true
+          path: build/transfer
+      - name: Verify prepared transfer bytes
+        env:
+          TRANSFER_SHA256: ${{ needs.prepare.outputs.transfer_sha256 }}
+        run: python3 scripts/release_transfer.py unpack --archive build/transfer/prepared-transfer.zip --sha256 "$TRANSFER_SHA256" --output build/release
+      - name: Install digest-pinned signature verifier
+        run: python3 scripts/release_tools.py cosign --install
+      - name: Sign and seal exact prepared bytes
         env:
           ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
           ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_PASSWORD }}
-          VERSION: ${{ github.ref_name }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ./gradlew publishAndReleaseToMavenCentral -Pversion="${VERSION#v}"
-          ./gradlew cyclonedxBom
-          gh release create "$VERSION" --draft --generate-notes \
-            $(find . -path "*/build/reports/cyclonedx/bom.json" | tr '\n' ' ')
+          python3 scripts/release_signatures.py pgp-sign --candidate build/release/prepared
+          python3 scripts/release_candidate.py assemble --prepared build/release/prepared --output build/signed --report quality=build/release/reports/quality --report security=build/release/reports/security --report consumers=build/release/reports/consumers --report examples=build/release/reports/examples
+      - name: Bind manifest to this repository and tag workflow identity
+        run: python3 scripts/release_signatures.py sigstore-sign --manifest build/signed/release-manifest.json --bundle build/signed/release-manifest.sigstore.json
+      - name: Retain independent manifest identity
+        id: identity
+        run: |
+          python3 - <<'PYTHON'
+          import hashlib, os
+          from pathlib import Path
+          digest = hashlib.sha256(Path('build/signed/release-manifest.json').read_bytes()).hexdigest()
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('manifest_sha256=' + digest + '\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as output:
+              output.write('Signed candidate manifest SHA-256: `' + digest + '`\n')
+          PYTHON
+      - name: Seal signed transfer
+        id: transfer
+        run: |
+          digest="$(python3 scripts/release_transfer.py pack --source build/signed --archive build/signed-transfer.zip)"
+          echo "sha256=$digest" >> "$GITHUB_OUTPUT"
+          echo "Signed transfer SHA-256: $digest" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        id: upload
+        with:
+          name: signed-candidate-${{ github.run_attempt }}
+          path: build/signed-transfer.zip
+          if-no-files-found: error
+          retention-days: 90
+
+  accept:
+    needs: sign
+    if: ${{ always() && (needs.sign.result == 'success' || inputs.operation == 'resume') }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      artifact_id: ${{ steps.inputs.outputs.artifact_id }}
+      candidate_run_id: ${{ steps.inputs.outputs.candidate_run_id }}
+      manifest_sha256: ${{ steps.inputs.outputs.manifest_sha256 }}
+      transfer_sha256: ${{ steps.inputs.outputs.transfer_sha256 }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate preserved artifact references and exact tag
+        id: inputs
+        env:
+          ARTIFACT_ID: ${{ inputs.signed_artifact_id || needs.sign.outputs.artifact_id }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id || github.run_id }}
+          MANIFEST_SHA256: ${{ inputs.manifest_sha256 || needs.sign.outputs.manifest_sha256 }}
+          TRANSFER_SHA256: ${{ inputs.transfer_sha256 || needs.sign.outputs.transfer_sha256 }}
+        run: |
+          test "$GITHUB_REF_TYPE" = tag
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          python3 scripts/prepare_release.py validate-tag --tag "$GITHUB_REF_NAME" --expected-commit "$(git rev-parse HEAD)"
+          python3 - <<'PYTHON'
+          import os, re
+          values = {key: os.environ[key] for key in ('ARTIFACT_ID', 'CANDIDATE_RUN_ID', 'MANIFEST_SHA256', 'TRANSFER_SHA256')}
+          assert values['ARTIFACT_ID'].isdigit() and values['CANDIDATE_RUN_ID'].isdigit(), 'Missing artifact/run identity'
+          assert all(re.fullmatch('[0-9a-f]{64}', values[k]) for k in ('MANIFEST_SHA256','TRANSFER_SHA256')), 'Missing independent digest'
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              for key, value in values.items(): output.write(key.lower() + '=' + value + '\n')
+          PYTHON
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ steps.inputs.outputs.artifact_id }}
+          run-id: ${{ steps.inputs.outputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+          merge-multiple: true
+          path: build/transfer
+      - name: Verify signed transfer bytes
+        env:
+          TRANSFER_SHA256: ${{ steps.inputs.outputs.transfer_sha256 }}
+        run: python3 scripts/release_transfer.py unpack --archive build/transfer/signed-transfer.zip --sha256 "$TRANSFER_SHA256" --output build/signed
+      - name: Verify preserved sealed bytes
+        env:
+          MANIFEST_SHA256: ${{ steps.inputs.outputs.manifest_sha256 }}
+        run: python3 scripts/release_candidate.py verify --candidate build/signed --sha256 "$MANIFEST_SHA256"
+      - name: Independently revalidate all gates for a new publication
+        if: ${{ inputs.operation != 'resume' }}
+        env:
+          MANIFEST_SHA256: ${{ steps.inputs.outputs.manifest_sha256 }}
+          EVIDENCE_SHA256: ${{ vars.QUOTAFLOW_RELEASE_EVIDENCE_SHA256 }}
+          QUALITY_SHA256: ${{ vars.QUOTAFLOW_RELEASE_MANIFEST_SHA256 }}
+          BASELINE_SHA256: ${{ vars.QUOTAFLOW_BASELINE_REVIEW_SHA256 }}
+        run: |
+          python3 scripts/release_tools.py cosign --install
+          python3 scripts/release_acceptance.py --candidate build/signed --sha256 "$MANIFEST_SHA256" --quality-archive-sha256 "$EVIDENCE_SHA256" --quality-manifest-sha256 "$QUALITY_SHA256" --baseline-review-sha256 "$BASELINE_SHA256"
+
+  promote:
+    needs: accept
+    if: ${{ always() && needs.accept.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: release-promotion
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ needs.accept.outputs.artifact_id }}
+          run-id: ${{ needs.accept.outputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+          merge-multiple: true
+          path: build/transfer
+      - name: Verify exact accepted transfer
+        env:
+          TRANSFER_SHA256: ${{ needs.accept.outputs.transfer_sha256 }}
+        run: python3 scripts/release_transfer.py unpack --archive build/transfer/signed-transfer.zip --sha256 "$TRANSFER_SHA256" --output build/signed
+      - name: Install verified signature tooling
+        run: python3 scripts/release_tools.py cosign --install
+      - name: Publish once or reconcile the same deployment
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.CENTRAL_PORTAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.CENTRAL_PORTAL_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          MANIFEST_SHA256: ${{ needs.accept.outputs.manifest_sha256 }}
+          EVIDENCE_SHA256: ${{ vars.QUOTAFLOW_RELEASE_EVIDENCE_SHA256 }}
+          QUALITY_SHA256: ${{ vars.QUOTAFLOW_RELEASE_MANIFEST_SHA256 }}
+          BASELINE_SHA256: ${{ vars.QUOTAFLOW_BASELINE_REVIEW_SHA256 }}
+          RECOVERED_DEPLOYMENT: ${{ inputs.recovered_deployment }}
+        shell: bash
+        run: |
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          recovery=()
+          if [ -n "$RECOVERED_DEPLOYMENT" ]; then recovery+=(--recovered-deployment "$RECOVERED_DEPLOYMENT"); fi
+          python3 scripts/publish_release.py --candidate build/signed --sha256 "$MANIFEST_SHA256" --quality-archive-sha256 "$EVIDENCE_SHA256" --quality-manifest-sha256 "$QUALITY_SHA256" --baseline-review-sha256 "$BASELINE_SHA256" --wait-seconds 1800 "${recovery[@]}"

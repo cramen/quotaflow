@@ -46,3 +46,22 @@ See [artifact verification](artifact-verification.md). Namespace ownership,
 protected release environments, CI secrets and local evidence transfer also need
 explicit operator setup. Test keys and public vendor signature fixtures do not
 substitute for the project's production identity.
+
+## Successor implementation in progress
+
+Canonical candidate sealing and a local rehearsal are now available; see
+[release rehearsal](release-rehearsal.md). Sealing verifies the prepared artifact
+inventory, SBOM and metadata, packages deterministic Maven bytes and binds report
+files. A read-only evidence gate revalidates all 16 quality stages and current
+security evidence. The local rehearsal uses the promotion state machine and
+durable journal with filesystem service doubles, including completed-run resume.
+
+The [production acceptance and publication entry points](release-acceptance.md)
+now connect these checks to the Portal/GitHub orchestrator and isolated CI jobs.
+Every required gate runs before publishing mutations; missing production identity
+and staged consumer/example evidence block acceptance. The external fixture runner
+executes 60 consumers and five README scenarios, scans resolved runtime bytes and
+retains exact-candidate evidence. Use `scripts/release_readiness.py` to inspect the
+current result; historical or diagnostic runs do not certify a later candidate.
+Live production identity verification and final certification remain outstanding.
+Rehearsal outputs explicitly report production readiness as unverified.

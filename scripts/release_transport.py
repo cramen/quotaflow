@@ -60,11 +60,13 @@ class Portal:
         password = credentials["ORG_GRADLE_PROJECT_mavenCentralPassword"]
         self.token = base64.b64encode((user + ":" + password).encode()).decode()
 
-    def upload(self, bundle, name):
+    def upload(self, bundle, name, expected_sha256):
+        payload = bundle.read_bytes()
+        require(hashlib.sha256(payload).hexdigest() == expected_sha256, "Maven bundle changed before upload")
         boundary = "quotaflow-" + uuid.uuid4().hex
         body = (("--" + boundary + '\r\nContent-Disposition: form-data; name="bundle"; filename="candidate.zip"'
                  + "\r\nContent-Type: application/octet-stream\r\n\r\n").encode()
-                + bundle.read_bytes() + ("\r\n--" + boundary + "--\r\n").encode())
+                + payload + ("\r\n--" + boundary + "--\r\n").encode())
         query = urllib.parse.urlencode({"publishingType": "USER_MANAGED", "name": name})
         value = request("POST", self.base + "/upload?" + query, self.token, body,
                         "multipart/form-data; boundary=" + boundary).decode().strip()

@@ -3,6 +3,7 @@
 import argparse
 import datetime as dt
 import hashlib
+import gzip
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,38 @@ import subprocess
 
 from release_common import require, safe_artifact, sha256
 from release_tools import ROOT, tool
+
+MAX_DATABASE_BYTES = 8 * 1024 * 1024 * 1024
+
+
+def retain_database(source, target, expected):
+    """Retain every database byte, with bounded streaming compression."""
+    digest=hashlib.sha256();size=0
+    with Path(source).open('rb') as reader, Path(target).open('xb') as output:
+        with gzip.GzipFile(filename='',fileobj=output,mode='wb',mtime=0,compresslevel=6) as writer:
+            while chunk:=reader.read(1024*1024):
+                size+=len(chunk);require(size<=MAX_DATABASE_BYTES,'Vulnerability database exceeds retention limit')
+                digest.update(chunk);writer.write(chunk)
+    require(digest.hexdigest()==expected,'Vulnerability database changed during retention')
+    return {'path':Path(target).name,'sha256':sha256(target),'encoding':'gzip',
+            'uncompressedSha256':expected,'uncompressedSize':size}
+
+
+def verify_database(directory, reference):
+    path=safe_artifact(directory,reference)
+    if 'encoding' not in reference: return path
+    require(reference['encoding']=='gzip' and 0<reference['uncompressedSize']<=MAX_DATABASE_BYTES,'Unsupported database encoding or size')
+    digest=hashlib.sha256();size=0
+    try:
+        with gzip.open(path,'rb') as reader:
+            while chunk:=reader.read(1024*1024):
+                size+=len(chunk);require(size<=reference['uncompressedSize'],'Expanded database exceeds declared size')
+                digest.update(chunk)
+    except (OSError,EOFError) as failure:
+        raise ValueError('Invalid compressed vulnerability database') from failure
+    require(size==reference['uncompressedSize'] and digest.hexdigest()==reference['uncompressedSha256'],
+            'Retained database content differs from scanned bytes')
+    return path
 
 
 def instant(value):
@@ -68,7 +101,7 @@ def evaluate(raw, database, candidate, reviews, policy, now=None, evidence_root=
     return {"status": "BLOCKED" if any(f["disposition"] == "BLOCKED" for f in findings) else "PASS", "findings": findings}
 
 
-def scan(candidate_root, output, cache, tools_directory, refresh=False):
+def scan(candidate_root, output, cache, tools_directory, refresh=False, *, allow_reviews=True, review_document=None):
     candidate_root = Path(candidate_root).resolve(); output = Path(output).resolve(); cache = Path(cache).resolve()
     manifest_path = candidate_root / "candidate-manifest.json"
     manifest = json.loads(manifest_path.read_text()); sbom = safe_artifact(candidate_root, manifest["sbom"])
@@ -103,15 +136,16 @@ def scan(candidate_root, output, cache, tools_directory, refresh=False):
     require(raw["source"]["type"] == "sbom-file" and Path(raw["source"]["target"]).resolve() == sbom, "Scanner analyzed another input")
     require(instant(raw["descriptor"]["timestamp"]) >= started - dt.timedelta(minutes=5), "Reused scanner report")
     reviews_path = ROOT / "verification/reachability.json"
-    reviews = json.loads(reviews_path.read_text())
+    require(review_document is None or allow_reviews,'Review override cannot enable disabled reviews')
+    reviews = review_document if review_document is not None else (json.loads(reviews_path.read_text()) if allow_reviews else {"schemaVersion":1,"reviews":[]})
     require(reviews["schemaVersion"] == 1, "Unsupported reachability policy")
     verdict = evaluate(raw, database, candidate, reviews["reviews"], policy)
-    shutil.copyfile(database_path, output / "vulnerability.db")
-    shutil.copyfile(reviews_path, output / "reachability.json")
+    retained_database=retain_database(database_path,output/'vulnerability.db.gz',before)
+    (output / "reachability.json").write_text(json.dumps(reviews,indent=2)+'\n')
     report = {"schemaVersion": 1, "candidate": candidate, "candidateManifestSha256": sha256(manifest_path),
               "sbomSha256": manifest["sbom"]["sha256"], "scanner": scanner_identity,
               "createdAt": dt.datetime.now(dt.timezone.utc).isoformat(), "databaseBuiltAt": database["built"],
-              "database": {"path": "vulnerability.db", "sha256": before},
+              "database": retained_database,
               "rawReport": {"path": "raw-scan.json", "sha256": sha256(output / "raw-scan.json")},
               "triage": {"path": "reachability.json", "sha256": sha256(output / "reachability.json")}, **verdict}
     (output / "security.json").write_text(json.dumps(report, indent=2) + "\n")
@@ -127,7 +161,7 @@ def verify_security(directory, candidate, sbom_sha256, now=None, evidence_root=R
     scanner = report["scanner"]
     require(scanner["version"] == configured["version"] and
             scanner["downloadSha256"] == configured["platforms"][scanner["platform"]]["sha256"], "Unpinned security scanner")
-    safe_artifact(directory, report["database"])
+    verify_database(directory, report["database"])
     raw = json.loads(safe_artifact(directory, report["rawReport"]).read_text())
     reviews = json.loads(safe_artifact(directory, report["triage"]).read_text())["reviews"]
     policy = json.loads((ROOT / "verification/release-policy.json").read_text())["vulnerabilities"]

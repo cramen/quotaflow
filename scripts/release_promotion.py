@@ -66,13 +66,24 @@ def advance(root, manifest, manifest_sha256, assets, journal, portal, github, ve
     state = journal.load()
     if state is not None:
         require(state["identity"] == identity, "Version already belongs to a different candidate")
-    irreversible = state is not None and state["phase"] in {"CENTRAL_PUBLISHED", "COMPLETE"}
+        require(state["phase"] in {"DRAFT_VERIFIED", "UPLOAD_INTENT", "UPLOADED", "PROMOTION_INTENT", "CENTRAL_PUBLISHED", "COMPLETE"},
+                "Unknown release journal phase")
+    irreversible = False
+    if state is not None and state["phase"] in {"CENTRAL_PUBLISHED", "COMPLETE"}:
+        expected = [purl(GROUP, module, candidate["version"]) for module in MODULES]
+        observed = verify_deployment(portal, state["deployment"], safe_artifact(root, manifest["mavenBundle"]), expected)
+        require(observed == "PUBLISHED", "Recorded publication is not confirmed by Central")
+        irreversible = True
     if state is not None and state["phase"] in {"UPLOADED", "PROMOTION_INTENT"}:
         # A runner can die after Central commits but before journaling success.
         # Query the known ID before applying expiring pre-publication evidence.
-        observed = portal.status(state["deployment"])
-        require(observed["deploymentId"] == state["deployment"], "Portal returned a different deployment")
-        irreversible = observed["deploymentState"] == "PUBLISHED"
+        expected = [purl(GROUP, module, candidate["version"]) for module in MODULES]
+        observed = verify_deployment(portal, state["deployment"], safe_artifact(root, manifest["mavenBundle"]), expected)
+        irreversible = observed == "PUBLISHED"
+    if state is not None and state["phase"] == "UPLOAD_INTENT" and recovered_deployment is not None:
+        expected = [purl(GROUP, module, candidate["version"]) for module in MODULES]
+        observed = verify_deployment(portal, recovered_deployment, safe_artifact(root, manifest["mavenBundle"]), expected)
+        irreversible = observed == "PUBLISHED"
     verify_gates(irreversible)
     bundle = safe_artifact(root, manifest["mavenBundle"])
     expected = [purl(GROUP, module, candidate["version"]) for module in MODULES]
@@ -90,10 +101,11 @@ def advance(root, manifest, manifest_sha256, assets, journal, portal, github, ve
         journal.save(state)
 
     if state["phase"] == "DRAFT_VERIFIED":
+        verify_gates(False)
         transition("UPLOAD_INTENT", attempt=str(uuid.uuid4()))
         # Any exception, process death or failed journal write leaves UPLOAD_INTENT.
         # The next invocation refuses another upload, even if the first sent no bytes.
-        deployment = portal.upload(bundle, "quotaflow-" + candidate["version"] + "-" + manifest_sha256[:16])
+        deployment = portal.upload(bundle, "quotaflow-" + candidate["version"] + "-" + manifest_sha256[:16], manifest["mavenBundle"]["sha256"])
         transition("UPLOADED", deployment=deployment)
     if state["phase"] == "UPLOAD_INTENT":
         if recovered_deployment is None:
