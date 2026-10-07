@@ -261,14 +261,23 @@ class RecoveryReloadTest {
             primary.available = false;
             var key = new BucketIdentity(new QuotaDomain("default", "quota"), "quota", Scope.USER, "a");
             assertFalse(store.tryAcquire(key, limit, algorithm, 1).acquired());
-            assertFalse(store.tryAcquire(key, limit, algorithm, 1).acquired());
+            FallbackRateLimitStoreTest.await(() -> {
+                var decision = store.tryAcquire(key, limit, algorithm, 1);
+                assertFalse(decision.acquired());
+                return decision.recoveryPending() == null;
+            });
             assertEquals(1, store.trackedBuckets());
             time.set(Duration.ofMillis(500).toNanos()); assertTrue(store.tryAcquire(key, limit, algorithm, 1).acquired());
             time.set(Duration.ofMillis(2499).toNanos());
             Thread.sleep(40); assertEquals(1, store.trackedBuckets(), "debt history must retain the attempt grace period");
             time.set(Duration.ofMillis(2500).toNanos());
             FallbackRateLimitStoreTest.await(() -> store.trackedBuckets() == 0);
-            assertFalse(store.tryAcquire(key, limit, algorithm, 1).acquired(), "expired observations must allocate empty guards");
+            // Removing the entry precedes release of the domain maintenance fence.
+            FallbackRateLimitStoreTest.await(() -> {
+                var decision = store.tryAcquire(key, limit, algorithm, 1);
+                assertFalse(decision.acquired(), "expired observations must allocate empty guards");
+                return decision.recoveryPending() == null;
+            });
             assertEquals(1, store.trackedBuckets());
         }
     }

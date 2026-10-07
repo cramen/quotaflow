@@ -7,20 +7,30 @@ import org.springframework.asm.*;
 final class InitializationInstruction {
     private record Code(ClassReader reader, int offset, int length, int access, boolean monitor) { }
     static boolean provesResolution(RecordedFrame frame) {
+        var method = frame.getMethod();
+        return provesResolution(frame.getType(), method.getType().getName().replace('.', '/'),
+                method.getName(), method.getDescriptor(), frame.getBytecodeIndex());
+    }
+    static boolean provesResolution(String frameType, String owner, String name, String descriptor, int bci) {
         try {
-            if (!"Interpreted".equals(frame.getType())) return false;
-            var method = frame.getMethod();
-            String owner = method.getType().getName().replace('.', '/');
-            var code = read(owner, method.getName(), method.getDescriptor());
+            if (!"Interpreted".equals(frameType)) return false;
+            var code = read(owner, name, descriptor);
             if (code == null || code.monitor || (code.access & Opcodes.ACC_SYNCHRONIZED) != 0) return false;
-            int bci = frame.getBytecodeIndex();
             if (bci < 0 || bci + 2 >= code.length) return false;
             var reader = code.reader; int offset = code.offset + bci;
             int opcode = reader.readByte(offset); int item = reader.getItem(reader.readUnsignedShort(offset + 1));
             char[] buffer = new char[reader.getMaxStringLength()];
             if (opcode == Opcodes.NEW) {
                 String target = reader.readUTF8(item, buffer);
-                return owner.startsWith("io/quotaflow/core/") && target.startsWith("io/quotaflow/core/");
+                if (owner.startsWith("io/quotaflow/core/") && target.startsWith("io/quotaflow/core/")) return true;
+                // At this interpreted NEW the scheduler has not entered the task
+                // constructor. Require the exact bootstrap-owned allocation site
+                // and a target without its own initializer, not a JDK-name exemption.
+                return owner.equals("java/util/concurrent/ScheduledThreadPoolExecutor") && name.equals("schedule")
+                        && target.equals(owner + "$ScheduledFutureTask")
+                        && Class.forName(owner.replace('/', '.'), false, null).getClassLoader() == null
+                        && Class.forName(target.replace('/', '.'), false, null).getClassLoader() == null
+                        && read(target, "<clinit>", "()V") == null;
             }
             if (opcode != Opcodes.INVOKESTATIC && opcode != Opcodes.GETSTATIC && opcode != Opcodes.PUTSTATIC) return false;
             String target = reader.readUTF8(reader.getItem(reader.readUnsignedShort(item)), buffer);
@@ -28,8 +38,8 @@ final class InitializationInstruction {
                     && !target.startsWith("io/quotaflow/fallback/")) return false;
             if (opcode == Opcodes.GETSTATIC || opcode == Opcodes.PUTSTATIC) return true;
             int nameType = reader.getItem(reader.readUnsignedShort(item + 2));
-            String name = reader.readUTF8(nameType, buffer), descriptor = reader.readUTF8(nameType + 2, buffer);
-            var called = read(target, name, descriptor);
+            String calledName = reader.readUTF8(nameType, buffer), calledDescriptor = reader.readUTF8(nameType + 2, buffer);
+            var called = read(target, calledName, calledDescriptor);
             // The interpreted caller has not entered the Java method. Reject native,
             // synchronized or monitor-containing targets: their entry is not sufficient
             // evidence of VM-only resolution. No generic class-name exemption is used.

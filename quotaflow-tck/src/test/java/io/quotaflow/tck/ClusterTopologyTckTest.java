@@ -294,7 +294,10 @@ class ClusterTopologyTckTest {
         String namespace = "moved-" + UUID.randomUUID();
         try (var connection = clusterClient.connect();
              var store = new io.quotaflow.testing.RecoveryStoreFixture(connection, RedisStoreConfig.defaults())) {
-            new io.quotaflow.store.redis.RedisNamespaceAdmin(connection).provisionFresh(namespace, true);
+            var admin = new io.quotaflow.store.redis.RedisNamespaceAdmin(connection);
+            admin.provisionFresh(namespace, true);
+            var primaryIds = admin.primaryIds();
+            assertEquals(3, primaryIds.size());
             var domain = new io.quotaflow.core.store.QuotaDomain(namespace, "parent");
             var parent = new BucketIdentity(domain, "parent", io.quotaflow.core.Scope.GLOBAL, "shared");
             var limit = new Limit(3, 1, Duration.ofHours(1));
@@ -303,7 +306,8 @@ class ClusterTopologyTckTest {
             assertTrue(store.tryAcquireAll(chain).toCompletableFuture().join().acquired());
             int slot = io.lettuce.core.cluster.SlotHash.getSlot(RedisKeyScheme.defaults().singleKey(parent));
             var source = connection.getPartitions().getPartitionBySlot(slot);
-            var target = connection.getPartitions().stream().filter(node -> node.is(io.lettuce.core.cluster.models.partitions.RedisClusterNode.NodeFlag.MASTER)
+            assertTrue(primaryIds.contains(source.getNodeId()));
+            var target = connection.getPartitions().stream().filter(node -> primaryIds.contains(node.getNodeId())
                     && !node.getNodeId().equals(source.getNodeId())).findFirst().orElseThrow();
             var from = connection.getConnection(source.getNodeId()).sync();
             var to = connection.getConnection(target.getNodeId()).sync();
@@ -323,7 +327,7 @@ class ClusterTopologyTckTest {
             to.scriptFlush();
             // Slot still belongs to the source: this invocation must follow ASK and reload Lua.
             assertTrue(store.tryAcquireAll(chain).toCompletableFuture().join().acquired());
-            for (var node : connection.getPartitions()) if (node.is(io.lettuce.core.cluster.models.partitions.RedisClusterNode.NodeFlag.MASTER))
+            for (var node : connection.getPartitions()) if (primaryIds.contains(node.getNodeId()))
                 assertEquals("OK", cluster.execInContainer(CLI, "-p", Integer.toString(node.getUri().getPort()),
                         "CLUSTER", "SETSLOT", Integer.toString(slot), "NODE", target.getNodeId()).getStdout().trim());
             to.scriptFlush();

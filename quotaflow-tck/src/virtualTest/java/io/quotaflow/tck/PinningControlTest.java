@@ -71,6 +71,16 @@ class PinningControlTest {
                 PinningEvidence.classify("unknown", List.of(cache, linker, "io.quotaflow.core.Entry#acquire")));
     }
 
+    @org.junit.jupiter.api.Test void schedulerAllocationRequiresAnExactInterpretedBytecodeProof() {
+        String owner = "java/util/concurrent/ScheduledThreadPoolExecutor";
+        String descriptor = "(Ljava/lang/Runnable;JLjava/util/concurrent/TimeUnit;)Ljava/util/concurrent/ScheduledFuture;";
+        assertTrue(InitializationInstruction.provesResolution("Interpreted", owner, "schedule", descriptor, 19));
+        assertFalse(InitializationInstruction.provesResolution("JIT compiled", owner, "schedule", descriptor, 19));
+        assertFalse(InitializationInstruction.provesResolution("Interpreted", owner, "schedule", descriptor, 0));
+        assertFalse(InitializationInstruction.provesResolution("Interpreted", owner, "execute", "(Ljava/lang/Runnable;)V", 19));
+        assertFalse(InitializationInstruction.provesResolution("Interpreted", "io/quotaflow/core/verification/KnownBlockingInitialization", "touch", "()V", 19));
+    }
+
     @org.junit.jupiter.api.Test void aBlockingLibraryInitializerIsNotExcusedAsVmInitialization() throws Exception {
         Path path = Path.of("build/reports/virtual-threads", "jdk" + Runtime.version().feature(), "blocking-initializer-control.jfr");
         Files.createDirectories(path.getParent());
