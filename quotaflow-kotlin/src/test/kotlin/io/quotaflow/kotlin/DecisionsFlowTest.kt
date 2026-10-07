@@ -15,7 +15,10 @@ import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.future.await
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -27,7 +30,9 @@ class DecisionsFlowTest {
 
     @Test
     fun `exactly one event per final decision including throttled retries`() = runBlocking {
-        val flow = flowFor(throttlePolicy("t", 1, 1, Duration.ofMillis(40)))
+        val clock = java.util.concurrent.atomic.AtomicLong()
+        val policies = PolicySet.compile(listOf(throttlePolicy("t", 1, 1, Duration.ofMillis(40))))
+        val flow = CoroutineQuotaFlow.builder(policies, LocalRateLimitStore { clock.get() }).build()
         val collected = CopyOnWriteArrayList<DecisionEvent>()
         val collector = launch(Dispatchers.Default) {
             flow.decisions().collect { collected += it }
@@ -35,20 +40,23 @@ class DecisionsFlowTest {
         awaitCondition("subscription registered") { flow.eventBus.subscriberCount == 1 }
         try {
             val instantAllow = flow.tryAcquire("t", context)
-            val waitedAllow = flow.acquire("t", context, 1, 5.seconds)
+            val pending = async { flow.acquire("t", context, 1, 5.seconds) }
+            awaitCondition("request queued before refill") { flow.delegate.waitQueueDepth("t") == 1 }
+            clock.set(Duration.ofMillis(40).toNanos())
+            val waitedAllow = withTimeout(5_000) { pending.await() }
             val instantRejection = flow.tryAcquire("t", context)
 
             awaitCondition("all decisions streamed") { collected.size == 3 }
 
             assertTrue(instantAllow.isAllowed)
             assertTrue(waitedAllow.isAllowed)
-            assertTrue(waitedAllow.waitDuration().toMillis() > 0)
+            assertTrue(waitedAllow.waitDuration().toNanos() > 0)
             assertFalse(instantRejection.isAllowed)
 
             // One event per final decision — the throttled acquisition retried
             // against the store at least once yet emitted exactly one event.
             assertEquals(3, collected.size)
-            val waitedEvent = collected.single { it.decision.waitDuration().toMillis() > 0 }
+            val waitedEvent = collected.single { it.decision.waitDuration().toNanos() > 0 }
             assertEquals(waitedAllow, waitedEvent.decision)
             assertTrue(collected.all { it.keyGroup == "global" })
         } finally {
@@ -88,34 +96,43 @@ class DecisionsFlowTest {
 
     @Test
     fun `slow collector drops events instead of delaying decisions`() = runBlocking {
-        val flow = flowFor(rejectPolicy("r", 1, 1, Duration.ofHours(1)))
+        val policies = PolicySet.compile(listOf(
+            rejectPolicy("r", 1, 1, Duration.ofHours(1)),
+            rejectPolicy("sentinel", 1, 1, Duration.ofHours(1))))
+        val flow = CoroutineQuotaFlow.builder(policies, LocalRateLimitStore { 0L }).build()
         val received = AtomicInteger()
-        val collector: Job = launch(Dispatchers.Default) {
+        val blocked = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val drained = CompletableDeferred<Unit>()
+        val collector = launch(Dispatchers.Default) {
             flow.decisions().collect {
-                received.incrementAndGet()
-                Thread.sleep(50) // deliberately slow consumer
+                if (received.incrementAndGet() == 1) {
+                    blocked.complete(Unit)
+                    release.await()
+                }
+                if (it.decision.policyId() == "sentinel") drained.complete(Unit)
             }
         }
-        awaitCondition("subscription registered") { flow.eventBus.subscriberCount == 1 }
         try {
-            flow.tryAcquire("r", context) // allowed; policy now exhausted
-            val start = System.nanoTime()
-            repeat(100) { flow.tryAcquire("r", context) }
-            val elapsedMillis = (System.nanoTime() - start) / 1_000_000
-
-            // 100 decisions while the collector needs ~50ms per event: any
-            // backpressure on the decision path would take seconds.
-            assertTrue(
-                elapsedMillis < 1_000,
-                "decisions were delayed by the slow collector (${elapsedMillis}ms)")
-            awaitCondition("collector observed the first events", timeoutMillis = 2_000) {
-                received.get() >= 1
+            awaitCondition("subscription registered") { flow.eventBus.subscriberCount == 1 }
+            withTimeout(5_000) {
+                assertTrue(flow.tryAcquire("r", context).isAllowed)
+                blocked.await()
+                repeat(100) { assertFalse(flow.tryAcquire("r", context).isAllowed) }
+                flow.delegate.flushObservations().toCompletableFuture().await()
+                assertTrue(flow.tryAcquire("sentinel", context).isAllowed)
+                flow.delegate.flushObservations().toCompletableFuture().await()
+                assertEquals(1, received.get(), "collector remains explicitly blocked")
+                release.complete(Unit)
+                drained.await()
             }
-            assertTrue(
-                received.get() < 100,
-                "slow collector should have dropped events, yet observed ${received.get()}")
+            // The final sentinel must survive DROP_OLDEST, while overflowed
+            // earlier events are dropped. No host throughput assumption is used.
+            assertTrue(received.get() < 102)
         } finally {
+            release.complete(Unit)
             collector.cancelAndJoin()
+            flow.delegate.close()
         }
     }
 
