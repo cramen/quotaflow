@@ -1,7 +1,6 @@
 {
   "schemaVersion": 1,
   "repository": "cramen/quotaflow",
-  "oidcIssuer": "https://oauth2.sigstore.dev/auth",
   "pgp": {
     "publicKey": "security/release-public-key.asc",
     "fingerprint": "E4D27CDC864CF8240CBC41117DD76A64DAB4ECF9"
@@ -10,6 +9,5 @@
     "maximumDatabaseAgeHours": 24,
     "maximumReportAgeHours": 24,
     "maximumTriageDays": 30
-  },
-  "certificateIdentity": null
+  }
 }

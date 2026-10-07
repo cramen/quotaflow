@@ -10,7 +10,7 @@
       "owner": "Quotaflow automated fixture review",
       "reviewedAt": "2026-10-07T04:21:19.067443+00:00",
       "expiresAt": "2026-10-14T04:21:19.067443+00:00",
-      "rationale": "Only the fixed REST compatibility fixtures qualify. Runtime assertions reject XsltView beans, XSLT-capable or unreviewed resolvers and wildcard controller mappings. A real XsltView negative control must fail. This review never covers arbitrary applications or the library production scan.",
+      "rationale": "Only the fixed REST compatibility fixtures qualify. Runtime assertions reject XsltView beans, XSLT-capable or unreviewed resolvers and wildcard controller mappings. A real XsltView negative control must fail. This review never covers arbitrary applications or the library production scan. Re-reviewed for the local PGP-only candidate: the runner changes only Maven coordinates and removal of unused signing-tool environment prefixes. REST routes, view guards, negative controls, aligned framework versions and library binary hashes are unchanged; the original expiry is retained.",
       "evidence": [
         {
           "path": "verification/consumer-xslt-review.md",
@@ -30,7 +30,7 @@
         },
         {
           "path": "scripts/run_staged_verification.py",
-          "sha256": "d36b691e58c16923b83561ce6bff0a5439ac4500b89683c22de22e9033d63083"
+          "sha256": "d97a83cd2337eaa10f05884a38496809cc8a6246501cd788bb68bb956a7b535d"
         },
         {
           "path": "verification/consumer-runtime.json",

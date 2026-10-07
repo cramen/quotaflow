@@ -1,4 +1,4 @@
-"""Actual ephemeral PGP signing controls and Sigstore identity boundary controls."""
+"""Actual ephemeral PGP asset and manifest signature controls."""
 import contextlib
 import copy
 import json
@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from release_common import sha256
-from release_signatures import gpg, gpg_home, sign_assets, sign_sigstore, sigstore_environment, verify_detached, verify_pgp, verify_sigstore
+from release_signatures import gpg, gpg_home, sign_assets, sign_manifest, verify_manifest, verify_detached, verify_pgp
 
 
 class PgpTest(unittest.TestCase):
@@ -73,40 +73,39 @@ class PgpTest(unittest.TestCase):
             verify_pgp(self.root,report,self.manifest,self.identity,production=False)
 
 
-class SigstoreBoundaryTest(unittest.TestCase):
+class ManifestTest(PgpTest):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="quotaflow-sigstore-control-"); self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name); self.blob = self.root / "manifest.json"; self.bundle = self.root / "signature.json"
-        self.blob.write_text('{"repository":"cramen/quotaflow","candidate":{"commit":"' + 'a' * 40 + '","version":"1.0.0"},"mode":"release"}')
-        self.bundle.write_text("{}"); self.policy = {"repository": "cramen/quotaflow", "certificateIdentity": "release@example.invalid", "oidcIssuer": "https://oauth2.sigstore.dev/auth"}
-
-    def test_verifier_requires_exact_local_identity_and_manifest_context(self):
-        with patch('release_signatures.tool', return_value=(Path('/approved/cosign'), {"version": "test"})), patch('release_signatures.subprocess.run', return_value=subprocess.CompletedProcess([], 0)) as run:
-            verify_sigstore(self.blob,self.bundle,self.policy,'v1.0.0','a'*40,self.root)
-            command=run.call_args.args[0]
-            self.assertIn('release@example.invalid',command)
-            self.assertIn(self.policy['oidcIssuer'],command)
-            self.assertNotIn('--certificate-github-workflow-sha',command)
-            for tag,commit in [('v2.0.0','a'*40),('v1.0.0','b'*40)]:
-                with self.assertRaisesRegex(ValueError,'manifest'):
-                    verify_sigstore(self.blob,self.bundle,self.policy,tag,commit,self.root)
-            changed=json.loads(self.blob.read_text());changed['repository']='other/project'
-            self.blob.write_text(json.dumps(changed))
-            with self.assertRaisesRegex(ValueError,'manifest'):
-                verify_sigstore(self.blob,self.bundle,self.policy,'v1.0.0','a'*40,self.root)
-
-    def test_missing_bundle_or_failed_crypto_verification_blocks(self):
-        with patch('release_signatures.tool', return_value=(Path('/approved/cosign'), {})), patch('release_signatures.subprocess.run', return_value=subprocess.CompletedProcess([], 1)):
-            with self.assertRaises(ValueError): verify_sigstore(self.blob, self.bundle, self.policy, 'v1.0.0', 'a' * 40, self.root)
-        self.bundle.unlink()
-        with self.assertRaisesRegex(ValueError, 'Missing'): verify_sigstore(self.blob, self.bundle, self.policy, 'v1.0.0', 'a' * 40, self.root)
-
-    def test_ambient_trust_overrides_and_non_release_signing_are_refused(self):
-        with patch.dict('os.environ', {'SIGSTORE_ROOT_FILE': '/untrusted/root', 'TUF_MIRROR': 'https://untrusted.invalid', 'GITHUB_ACTIONS': 'true'}):
-            environment = sigstore_environment(self.root)
-            self.assertNotIn('SIGSTORE_ROOT_FILE', environment); self.assertNotIn('TUF_MIRROR', environment)
-            with self.assertRaisesRegex(ValueError, 'local-only'):
-                sign_sigstore(self.blob, self.root/'new-bundle.json', self.policy, self.root)
+        super().setUp()
+        self.blob=self.root/'release-manifest.json'
+        self.document={'repository':'cramen/quotaflow','mode':'release','candidate':{'version':'1.0.0','commit':'a'*40}}
+        self.blob.write_text(json.dumps(self.document))
+        self.policy={'repository':'cramen/quotaflow','pgp':{'fingerprint':self.identity,'publicKey':str(self.public)}}
+    def sign_manifest(self):return sign_manifest(self.blob,self.private,'',self.policy)
+    def check_manifest(self,tag='v1.0.0',commit='a'*40):
+        return verify_manifest(self.blob,str(self.blob)+'.asc',self.policy,tag,commit)
+    def test_manifest_signature_is_real_and_reusable_without_external_identity(self):
+        first=self.sign_manifest();self.assertEqual('PASS',first['status'])
+        self.assertEqual(first,self.sign_manifest());self.assertEqual(first,self.check_manifest())
+    def test_wrong_manifest_context_or_key_and_tampered_bytes_fail(self):
+        self.sign_manifest()
+        for tag,commit in [('v2.0.0','a'*40),('v1.0.0','b'*40)]:
+            with self.assertRaises(ValueError):self.check_manifest(tag,commit)
+        self.policy['pgp']['fingerprint']='0'*40
+        with self.assertRaises(ValueError):self.check_manifest()
+        self.policy['pgp']['fingerprint']=self.identity
+        self.blob.write_text(self.blob.read_text()+' ')
+        with self.assertRaises(ValueError):self.check_manifest()
+    def test_missing_and_corrupt_signatures_are_not_replaced(self):
+        with self.assertRaisesRegex(ValueError,'Missing'):self.check_manifest()
+        self.sign_manifest();Path(str(self.blob)+'.asc').write_text('corrupt')
+        with self.assertRaises(ValueError):self.sign_manifest()
+    def test_rehearsal_wrong_repository_and_ci_are_refused(self):
+        for key,value in [('mode','rehearsal'),('repository','other/project')]:
+            document=dict(self.document);document[key]=value;self.blob.write_text(json.dumps(document))
+            with self.assertRaises(ValueError):self.sign_manifest()
+        self.blob.write_text(json.dumps(self.document))
+        with patch.dict('os.environ',{'GITHUB_ACTIONS':'true'}):
+            with self.assertRaisesRegex(ValueError,'local-only'):self.sign_manifest()
 
 
 if __name__ == '__main__': unittest.main()

@@ -28,6 +28,6 @@ Fixes are released as soon as they are verified, not batched into feature releas
 ## Supply Chain
 
 - Every release is published with a CycloneDX SBOM attached to the GitHub Release.
-- Release artifacts require PGP signatures and a repository-bound Sigstore manifest; see [artifact verification](docs/artifact-verification.md). Production publication remains blocked until the approved public key and full fingerprint are configured and published.
+- Release artifacts require PGP signatures and a PGP-signed release manifest; see [artifact verification](docs/artifact-verification.md). Production publication remains blocked until the approved public key and full fingerprint are configured and published.
 - Reachable vulnerabilities at any severity, unknown reachability, missing scans and stale security evidence block a release. Exact package/advisory exclusions require a reviewed rationale, supporting evidence, an owner and an expiry.
 - Secrets (tokens, keys, Redis passwords) are never logged at any level; limit keys never appear in logs above DEBUG or in metric tags.

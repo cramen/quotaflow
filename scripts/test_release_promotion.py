@@ -77,7 +77,7 @@ class PromotionTest(unittest.TestCase):
                          [s['phase'] for s in self.journal.history])
 
     def test_every_failed_gate_prevents_any_upload(self):
-        for failure in ('credentials', 'tag', 'quality', 'soak', 'performance', 'CVE', 'PGP', 'Sigstore', 'SBOM'):
+        for failure in ('credentials', 'tag', 'quality', 'soak', 'performance', 'CVE', 'PGP', 'manifestPgp', 'SBOM'):
             with self.subTest(failure=failure):
                 def reject(_): raise ValueError(failure)
                 with self.assertRaises(ValueError): self.run_step(gates=reject)

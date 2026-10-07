@@ -225,16 +225,13 @@ reproducible core builds, negative controls and the local performance comparison
 Missing/skipped/stale/tampered evidence fails acceptance. No stage can replace
 another, and a runtime-change archive is never certification evidence.
 
-The release workflow downloads a ZIP containing `manifest.json` at its root.
-The archive URL, archive SHA-256, manifest SHA-256 and independently reviewed
-baseline digest are supplied through repository variables
-`QUOTAFLOW_RELEASE_EVIDENCE_URL`, `QUOTAFLOW_RELEASE_EVIDENCE_SHA256`,
-`QUOTAFLOW_RELEASE_MANIFEST_SHA256` and `QUOTAFLOW_BASELINE_REVIEW_SHA256`.
-They must be updated for the exact candidate before release verification. The
-importer validates the archive digest and rejects path traversal, symbolic links,
-missing manifests and oversized archives. GitHub rebuilds the candidate and
-checks imported evidence against those artifact identities; it never executes
-benchmarks. Publishing remains dependent on successful verification.
+The local publisher consumes a ZIP containing `manifest.json` at its root.
+Retain the archive SHA-256, manifest SHA-256 and independently reviewed baseline
+digest alongside the candidate. No CI release variables or remote evidence URL
+are required. The importer validates the archive digest and rejects path
+traversal, symbolic links, missing manifests and oversized archives. Local
+acceptance binds imported evidence to the prepared candidate; publication never
+rebuilds it. GitHub does not execute benchmarks or publish releases.
 
 ## Public conformance and soak
 

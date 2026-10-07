@@ -6,8 +6,7 @@ local Central credentials, PGP configuration and GitHub authentication; see the
 [operator guide](release-operator-guide.md).
 
 The immutable candidate, complete evidence gates, durable recovery journal,
-Central adapter and GitHub asset reconciliation are retained. Local signing and
-Sigstore identity replace the previous CI identity. Existing reports from commit
+Central adapter and GitHub asset reconciliation are retained. Local PGP signatures for artifacts and the manifest replace the previous CI signing flow. Existing reports from commit
 `1356fe1` describe the earlier coordinates and orchestration; they do not certify
 the changed candidate. Final exact-candidate verification and production identity
 checks remain prerequisites, reported honestly by `release_readiness.py`.

@@ -79,7 +79,7 @@ Explicit non-goals: no own Redis client, not an API gateway / service mesh, no s
 
 ## Security and Supply Chain
 
-SBOM (CycloneDX) per release, signed artifacts (Sigstore + PGP), reproducible core build, public SECURITY.md with fix SLAs (critical 7 days, high 30 days), release blocked on reachable CVEs. Never log secrets; no sensitive tariff/quota configuration in Redis in plaintext.
+SBOM (CycloneDX) per release, PGP-signed artifacts and release manifest, reproducible core build, public SECURITY.md with fix SLAs (critical 7 days, high 30 days), release blocked on reachable CVEs. Never log secrets; no sensitive tariff/quota configuration in Redis in plaintext.
 
 ## Workflow
 

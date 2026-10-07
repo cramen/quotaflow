@@ -22,10 +22,9 @@ is usable. Commit only its approved public key and full fingerprint in
 `verification/release-policy.json`; ensure the public key is discoverable by
 Central consumers. See [artifact verification](artifact-verification.md).
 
-Pin the local Sigstore certificate identity and issuer in the same policy before
-signing. Cosign uses interactive local OIDC authentication; a local signature is
-not GitHub workflow provenance. The signed manifest separately binds repository,
-version and source commit. Missing identity blocks acceptance.
+The same approved PGP key signs the canonical release manifest. No additional
+account, signing service, OIDC identity or browser authentication is required.
+The signed manifest binds repository, version, commit and artifact hashes.
 
 Use Python 3.11+, GPG, gh, Maven, JDK 17/21/25, Docker and the Gradle wrapper.
 Install pinned release tools through `scripts/release_tools.py`. YAML policy tests
@@ -63,13 +62,11 @@ reports using `release_candidate.py assemble` (see its `--help` for report argum
 then sign the sealed manifest:
 
 ```sh
-python3 scripts/release_signatures.py sigstore-sign \
-  --manifest build/release-sealed/release-manifest.json \
-  --bundle build/release-sealed/release-manifest.sigstore.json
+python3 scripts/release_signatures.py manifest-sign \
+  --manifest build/release-sealed/release-manifest.json
 ```
 
-Signing does not upload Maven artifacts or create a GitHub Release. Sigstore
-signing uses its public certificate and transparency services. Retain the manifest
+Signing runs locally and does not upload Maven artifacts or create a GitHub Release. Retain the manifest
 digest and signed candidate. Run [read-only acceptance](release-acceptance.md)
 before explicitly authorizing publication. Ordinary build success is insufficient.
 
@@ -79,7 +76,7 @@ After authorization, invoke `scripts/publish_release.py` with the candidate and
 all four independently retained digest arguments shown in the acceptance guide.
 It validates the same gates, creates and verifies GitHub draft assets, uploads
 one complete USER_MANAGED Central deployment, then completes the GitHub Release.
-The assets include the Maven bundle, SBOM, signed manifest, Sigstore bundle and
+The assets include the Maven bundle, SBOM, signed manifest, detached PGP signature and
 complete recovery archive. No library is rebuilt or signed during publication.
 
 An exclusive per-repository/version lock under `~/.quotaflow/release-locks`

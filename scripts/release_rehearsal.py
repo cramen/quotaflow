@@ -76,7 +76,7 @@ def rehearse(candidate, digest, output, quality_pins=None):
     require(manifest['mode']=='rehearsal','Local rehearsal requires an explicitly non-production package')
     require(not output.exists() and not output.is_relative_to(candidate),'Rehearsal output must be a fresh separate directory')
     output.mkdir(parents=True)
-    gates={'productionPgp':'UNVERIFIED','productionSigstore':'UNVERIFIED',
+    gates={'productionPgp':'UNVERIFIED','manifestPgp':'UNVERIFIED',
            'stagedConsumers':'UNVERIFIED','readmeExamples':'UNVERIFIED','quality':'UNVERIFIED','security':'UNVERIFIED'}
     report={'schemaVersion':1,'mode':'rehearsal','productionReadiness':'UNVERIFIED','externalPublishingOperations':0,
             'candidate':manifest['candidate'],'manifestSha256':digest,'gates':gates}

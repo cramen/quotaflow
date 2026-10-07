@@ -187,8 +187,8 @@ def verify_sealed(root, expected_digest):
             "Invalid sealed candidate state")
     files = indexed(root, manifest["files"])
     actual = {p.relative_to(root).as_posix() for p in regular_files(root)}
-    # A detached Sigstore bundle is added later and cannot be in its own signed manifest.
-    require(actual - set(files) - {"release-manifest.json", "release-manifest.sigstore.json"} == set()
+    # A detached PGP signature is added later and cannot be in its own signed manifest.
+    require(actual - set(files) - {"release-manifest.json", "release-manifest.json.asc"} == set()
             and set(files) <= actual, "Sealed file inventory mismatch")
     preparation = json.loads(safe_artifact(root, manifest["preparation"]).read_text())
     verify_prepared(root, preparation, sealed=True)

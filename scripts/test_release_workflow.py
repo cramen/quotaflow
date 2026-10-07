@@ -15,7 +15,7 @@ class WorkflowTest(unittest.TestCase):
             self.assertEqual({'contents':'read'},workflow['permissions'])
             for job in workflow['jobs'].values():
                 self.assertNotIn('write',job.get('permissions',{}).values())
-            for forbidden in ('publish_release.py','pgp-sign','sigstore-sign','CENTRAL_PORTAL_',
+            for forbidden in ('publish_release.py','pgp-sign','manifest-sign','CENTRAL_PORTAL_',
                               'secrets.SIGNING_', 'gh release', 'publishAndReleaseToMavenCentral'):
                 self.assertNotIn(forbidden,text)
     def test_benchmarks_remain_local(self):

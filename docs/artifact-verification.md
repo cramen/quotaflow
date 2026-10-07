@@ -1,6 +1,6 @@
 # Verify release artifacts
 
-Quotaflow requires both PGP signatures for Maven assets and a Sigstore signature
+Quotaflow requires PGP signatures for Maven assets and a PGP signature
 over the release manifest. The manifest binds the seven libraries, their version,
 source commit, SBOM and verification evidence to the exact shipped bytes.
 
@@ -33,32 +33,21 @@ Replace `VERSION` with the release version. A valid signature from an unexpected
 expired or revoked key is not an acceptable release signature. The automated
 verifier checks the primary identity even when a signing subkey was used.
 
-## Sigstore identity and manifest hashes
+## Signed manifest and artifact hashes
 
-Install the pinned Cosign version with the repository's digest-checking installer:
-
-```sh
-python3 scripts/release_tools.py cosign --install
-```
-
-The installer prints the verified executable path. Use that executable to verify
-the downloaded manifest and Sigstore bundle, replacing the three uppercase
-placeholders with the actual version, full commit SHA and file paths:
+The same approved PGP key signs `release-manifest.json`. Verify its detached
+signature before trusting its repository, version, commit, artifact hashes or
+SBOM references:
 
 ```sh
-cosign verify-blob \
-  --bundle MANIFEST.sigstore.json \
-  --certificate-identity 'APPROVED_LOCAL_IDENTITY' \
-  --certificate-oidc-issuer 'https://oauth2.sigstore.dev/auth' \
-  MANIFEST.json
+gpg --verify release-manifest.json.asc release-manifest.json
 ```
 
-Successful verification must include the approved local signer identity and
-transparency evidence. Do not disable transparency verification, use a permissive
-identity regular expression or substitute an ambient custom trust root.
-After verifying the manifest signature, compare the SHA-256 of every downloaded
-artifact and SBOM with its entry in that manifest. Verifying the manifest alone
-does not verify a different JAR downloaded later.
+Compare the signer fingerprint with the project policy and compare every artifact
+and SBOM SHA-256 with the verified manifest. A valid manifest signature does not
+verify a different JAR downloaded later. No separate signing service or browser
+login is required. The signature authenticates the manifest; it does not by itself
+prove that the code is safe or that all required tests ran.
 
 ## Security evidence
 
@@ -77,18 +66,12 @@ severity. The initial dependency fixes use no exclusions.
 
 ## Local verification controls
 
-The following commands use ephemeral test keys or public verification vectors;
+The following commands use ephemeral test keys;
 they do not publish, issue production signatures, or prove project release
 readiness:
 
 ```sh
 python3 scripts/test_release_security.py
 python3 scripts/test_release_signatures.py
-python3 scripts/test_sigstore_integration.py --output build/sigstore-controls
 python3 scripts/test_release_promotion.py
 ```
-
-The Sigstore integration control needs the pinned Cosign installation and network
-access for public test data and Sigstore trust metadata. Its vendor fixture has
-a main-branch workflow identity; the production verifier still requires the
-approved local identity shown above. Verify repository, commit and version in the signed manifest separately.

@@ -56,7 +56,7 @@ def tool(name, directory, install=False, platform_name=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("name", choices=("grype", "cosign")); parser.add_argument("--directory", type=Path, default=ROOT / "build/release-tools")
+    parser.add_argument("name", choices=("grype",)); parser.add_argument("--directory", type=Path, default=ROOT / "build/release-tools")
     parser.add_argument("--install", action="store_true")
     args = parser.parse_args()
     binary, identity = tool(args.name, args.directory, args.install)

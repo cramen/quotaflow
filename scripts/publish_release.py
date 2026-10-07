@@ -35,7 +35,7 @@ def delivery_archive(root, output):
 
 def verify_delivery(path, manifest, digest, signature_digest):
     expected={entry['path']:entry['sha256'] for entry in manifest['files']}
-    expected.update({'release-manifest.json':digest,'release-manifest.sigstore.json':signature_digest})
+    expected.update({'release-manifest.json':digest,'release-manifest.json.asc':signature_digest})
     with zipfile.ZipFile(path) as archive:
         names=archive.namelist()
         require(len(names)==len(set(names)) and set(names)==set(expected),'Delivery inventory mismatch')
@@ -63,13 +63,13 @@ def _publish_once(root, digest, pins, recovered_deployment=None):
     def gates(published):
         nonlocal acceptance
         acceptance=verify(root,digest,pins,published=published)
-        verify_delivery(delivery,manifest,digest,acceptance['gates']['sigstore']['bundleSha256'])
+        verify_delivery(delivery,manifest,digest,acceptance['gates']['manifestPgp']['signatureSha256'])
     # The state machine verifies all evidence and packaged bytes before any
     # external mutation. Delivery packaging itself performs no network calls.
     with tempfile.TemporaryDirectory(prefix='quotaflow-delivery-') as directory:
         delivery=Path(directory)/('quotaflow-'+manifest['candidate']['version']+'-candidate.zip')
         delivery_archive(root,delivery)
-        assets=[root/'release-manifest.json',root/'release-manifest.sigstore.json',
+        assets=[root/'release-manifest.json',root/'release-manifest.json.asc',
                 safe_artifact(root,manifest['mavenBundle']),safe_artifact(root,manifest['sbom']),delivery]
         bundle_digest=sha256(delivery)
         result=advance(root,manifest,digest,assets,journal,portal,github,gates,recovered_deployment)

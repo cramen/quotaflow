@@ -15,7 +15,7 @@ from candidate_identity import source_identity
 from release_candidate import verify_sealed
 from release_common import require, safe_artifact, sha256, tag_identity
 from release_evidence_gate import file_reference, quality, security
-from release_signatures import fingerprint, verify_pgp, verify_sigstore
+from release_signatures import fingerprint, verify_pgp, verify_manifest
 from release_tools import ROOT
 from scan_release import instant, verify_security
 
@@ -127,16 +127,15 @@ def staged_report(root, manifest, role, *, published=False):
     return {'status':'PASS','cases':len(runs),'runtimeSecurity':runtime}
 
 
-def verify(root, digest, pins, tools_directory=None, *, published=False):
+def verify(root, digest, pins, *, published=False):
     """Read-only acceptance; all gates must pass before a caller may publish."""
     root = Path(root); manifest = verify_sealed(root, digest); policy = project_policy()
     pgp = production_identity(root, manifest, policy)
     candidate = manifest['candidate']; tag = 'v' + candidate['version']
     identity = tag_identity(ROOT, tag, candidate['commit'])
     require(source_identity(ROOT)[1] == candidate['sourceSha256'], 'Checked-out sources differ from the candidate')
-    bundle = root / 'release-manifest.sigstore.json'
-    sigstore = verify_sigstore(root / 'release-manifest.json', bundle, policy, tag, candidate['commit'],
-                              tools_directory or ROOT / 'build/release-tools')
+    signature = root / 'release-manifest.json.asc'
+    manifest_signature = verify_manifest(root / 'release-manifest.json', signature, policy, tag, candidate['commit'])
     security_time = None
     if published:
         # Only the orchestrator supplies this after live reconciliation confirms
@@ -145,11 +144,11 @@ def verify(root, digest, pins, tools_directory=None, *, published=False):
         report = json.loads(safe_artifact(root, file_reference(manifest,'reports/security/security.json')).read_text())
         security_time = instant(report['createdAt'])
         require(security_time <= dt.datetime.now(dt.timezone.utc), 'Future security evidence')
-    result = {'pgp':pgp,'sigstore':sigstore,'quality':quality(root,manifest,pins),
+    result = {'pgp':pgp,'manifestPgp':manifest_signature,'quality':quality(root,manifest,pins),
               'security':security(root,manifest,now=security_time),'consumers':staged_report(root,manifest,'consumers',published=published),
               'examples':staged_report(root,manifest,'examples',published=published)}
     verify_sealed(root,digest)
-    require(sha256(bundle) == sigstore['bundleSha256'], 'Sigstore bundle changed during acceptance')
+    require(sha256(signature) == manifest_signature['signatureSha256'], 'Manifest signature changed during acceptance')
     return {'schemaVersion':1,'status':'PASS','scope':'completion-only' if published else 'pre-publication','candidate':candidate,
             'manifestSha256':digest,'verifiedAt':dt.datetime.now(dt.timezone.utc).isoformat(),
             'trustedMainCommit':identity['trustedMainCommit'],'gates':result}

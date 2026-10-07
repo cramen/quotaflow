@@ -25,8 +25,8 @@ This command requires no Central or GitHub publishing credentials. It verifies:
    project fingerprint and exact approved public-key bytes.
 3. A clean checkout of the exact release tag, full trusted main ancestry and
    matching source identity.
-4. The manifest's Sigstore bundle against the approved local certificate identity and OIDC issuer, with repository, tag and
-   full commit SHA bound in the signed manifest.
+4. The manifest's detached PGP signature against the same approved key, with
+   repository, tag and full commit SHA bound in the signed manifest.
 5. All 16 quality stages from the independently pinned archive and current
    security evidence bound to the same prepared manifest and SBOM.
 6. Complete staged consumer and README example results for that candidate.
@@ -77,7 +77,7 @@ external operations; use it only for an authorized release from the local operat
 
 The entry point packages the existing sealed files into a deterministic delivery
 archive; it does not rebuild any library. The delivery archive, Maven bundle,
-signed manifest, Sigstore bundle and SBOM are verified as draft assets before
+signed manifest, detached PGP signature and SBOM are verified as draft assets before
 Central upload. Every gate is checked before mutation, again immediately before
 upload, and again before promotion. The Portal adapter hashes the exact payload
 bytes before constructing its HTTP request.

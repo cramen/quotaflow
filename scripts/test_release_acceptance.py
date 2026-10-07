@@ -117,7 +117,7 @@ class PublicationBoundaryTest(unittest.TestCase):
         (security_dir/'security.json').write_text('{"createdAt":"2026-01-01T00:00:00+00:00"}')
         manifest=self.fixture.seal(reports={'security':security_dir}); manifest['mode']='release'
         self.root=self.fixture.output; (self.root/'release-manifest.json').write_bytes(encoded(manifest))
-        (self.root/'release-manifest.sigstore.json').write_text('{}')
+        (self.root/'release-manifest.json.asc').write_text('{}')
         self.digest=sha256(self.root/'release-manifest.json'); self.manifest=manifest
         self.github=LocalGitHub(self.fixture.root/'github'); self.portal=LocalPortal(self.fixture.root/'portal',version)
         self.stack=contextlib.ExitStack(); self.addCleanup(self.stack.close)
@@ -129,9 +129,9 @@ class PublicationBoundaryTest(unittest.TestCase):
         self.stack.enter_context(patch('release_acceptance.tag_identity',return_value={'trustedMainCommit':'c'*40}))
         self.stack.enter_context(patch('release_acceptance.source_identity',return_value=({},manifest['candidate']['sourceSha256'])))
         self.gates={}
-        for name in ('production_identity','quality','security','staged_report','verify_sigstore'):
+        for name in ('production_identity','quality','security','staged_report','verify_manifest'):
             value={'status':'PASS'}
-            if name=='verify_sigstore': value['bundleSha256']=sha256(self.root/'release-manifest.sigstore.json')
+            if name=='verify_manifest': value['signatureSha256']=sha256(self.root/'release-manifest.json.asc')
             self.gates[name]=self.stack.enter_context(patch('release_acceptance.'+name,return_value=value))
     def run_step(self,recovered=None): return publish_once(self.root,self.digest,{},recovered)
     def test_all_actual_gate_boundaries_precede_mutation(self):

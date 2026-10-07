@@ -27,7 +27,7 @@ MAINS={'core':'io.quotaflow.verification.published.CoreConsumer',
 
 def isolated_environment(work,java_home):
     prefixes=('ORG_GRADLE_PROJECT_','MAVEN_','GRADLE_','SPRING_','QUOTAFLOW_','SERVER_','MANAGEMENT_','LOGGING_',
-              'GRYPE_','SIGSTORE_','COSIGN_')
+              'GRYPE_')
     denied={'GH_TOKEN','GITHUB_TOKEN','SIGNING_KEY','SIGNING_PASSWORD','CENTRAL_PORTAL_USERNAME','CENTRAL_PORTAL_TOKEN',
             'JAVA_TOOL_OPTIONS','JDK_JAVA_OPTIONS','_JAVA_OPTIONS','JAVA_OPTS','M2_HOME'}
     result={key:value for key,value in os.environ.items()

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PGP asset verification and repository-bound Sigstore manifest signatures."""
+"""PGP signatures for Maven assets and the canonical release manifest."""
 import argparse
 import contextlib
 import json
@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 
 from release_common import require, safe_artifact, sha256
-from release_tools import ROOT, tool
+from release_tools import ROOT
 
 CHECKSUMS = {".md5", ".sha1", ".sha256", ".sha512"}
 
@@ -124,72 +124,60 @@ def verify_pgp(candidate_root, report, manifest, expected, production=True):
             verify_in_home(home, safe_artifact(root, entry["artifact"]), safe_artifact(root, entry["signature"]), expected)
 
 
-def sigstore_identity(policy, tag):
-    require(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", policy["repository"]), "Invalid repository identity")
-    identity=policy.get('certificateIdentity')
-    require(isinstance(identity,str) and identity.strip()==identity and identity and not any(c in identity for c in '*\\\n\r'),
-            'Configure the approved exact local Sigstore certificate identity')
-    require(policy.get('oidcIssuer')=='https://oauth2.sigstore.dev/auth','Unexpected local Sigstore issuer')
-    return identity
-
-
-def sigstore_manifest(blob, policy, tag, commit):
+def manifest_identity(blob, policy, tag, commit):
     manifest=json.loads(Path(blob).read_text())
     require(manifest.get('repository')==policy['repository'] and manifest['candidate']['commit']==commit
             and 'v'+manifest['candidate']['version']==tag and manifest['mode']=='release',
             'Signed manifest repository, tag, commit or mode mismatch')
 
 
-def sigstore_environment(tools_directory):
-    # Ambient custom trust roots must not change the release verifier's identity policy.
-    environment = {k:v for k,v in os.environ.items() if not k.startswith(("SIGSTORE_", "COSIGN_", "TUF_"))}
-    environment["TUF_ROOT"] = str(Path(tools_directory).resolve() / "sigstore-tuf")
-    return environment
+def verify_manifest(blob, signature, policy, tag, commit):
+    manifest_identity(blob,policy,tag,commit)
+    expected=fingerprint(policy['pgp']['fingerprint'])
+    verify_detached(blob,signature,ROOT/policy['pgp']['publicKey'],expected)
+    return {'status':'PASS','fingerprint':expected,'manifestSha256':sha256(blob),
+            'signatureSha256':sha256(signature),'commit':commit,'tag':tag}
 
 
-def verify_sigstore(blob, bundle, policy, tag, commit, tools_directory):
-    require(Path(bundle).is_file(), "Missing Sigstore bundle")
-    sigstore_manifest(blob,policy,tag,commit)
-    binary, identity = tool("cosign", tools_directory)
-    command = [str(binary), "verify-blob", "--bundle", str(bundle), "--certificate-identity", sigstore_identity(policy, tag),
-               "--certificate-oidc-issuer", policy["oidcIssuer"], str(blob)]
-    result = subprocess.run(command, capture_output=True, text=True, env=sigstore_environment(tools_directory))
-    require(result.returncode == 0, "Sigstore signature, transparency evidence or local signer/issuer identity is invalid")
-    return {"status": "PASS", "tool": identity, "manifestSha256": sha256(blob), "bundleSha256": sha256(bundle),
-            "certificateIdentity": sigstore_identity(policy, tag), "issuer": policy["oidcIssuer"], "commit": commit, "tag": tag}
-
-
-def sign_sigstore(blob, bundle, policy, tools_directory):
-    manifest = json.loads(Path(blob).read_text()); candidate = manifest["candidate"]; tag = "v" + candidate["version"]
-    require(os.environ.get('GITHUB_ACTIONS')!='true', 'Signing is local-only')
-    sigstore_identity(policy,tag)
-    sigstore_manifest(blob,policy,tag,candidate['commit'])
-    require(not Path(bundle).exists(), "Refusing to replace a Sigstore bundle")
-    binary, _ = tool("cosign", tools_directory)
-    result = subprocess.run([str(binary), "sign-blob", "--yes", "--bundle", str(bundle), str(blob)],
-                            env=sigstore_environment(tools_directory))
-    require(result.returncode == 0, "Keyless signing failed; credential material is not logged")
-    return verify_sigstore(blob, bundle, policy, tag, candidate["commit"], tools_directory)
+def sign_manifest(blob, private_key, password, policy):
+    require(os.environ.get('GITHUB_ACTIONS')!='true','Signing is local-only')
+    blob=Path(blob); manifest=json.loads(blob.read_text());candidate=manifest['candidate']
+    manifest_identity(blob,policy,'v'+candidate['version'],candidate['commit'])
+    expected=fingerprint(policy['pgp']['fingerprint']);before=sha256(blob)
+    signature=Path(str(blob)+'.asc')
+    with gpg_home() as home:
+        import_public(home,ROOT/policy['pgp']['publicKey'],expected)
+        secret=home/'key.gpg'
+        descriptor=os.open(secret,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+        with os.fdopen(descriptor,'wb') as stream:
+            stream.write(private_key.encode() if isinstance(private_key,str) else private_key)
+        gpg(home,['--import',str(secret)]);secret.unlink()
+        if not signature.exists():
+            gpg(home,['--pinentry-mode','loopback','--passphrase-fd','0','--local-user',expected,
+                      '--digest-algo','SHA256','--armor','--detach-sign','--output',str(signature.resolve()),str(blob.resolve())],
+                (password+'\n').encode())
+        verify_in_home(home,blob,signature,expected)
+    require(sha256(blob)==before,'Manifest changed while signing')
+    return verify_manifest(blob,signature,policy,'v'+candidate['version'],candidate['commit'])
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("pgp-sign", "sigstore-sign")); parser.add_argument("--candidate", type=Path)
-    parser.add_argument("--manifest", type=Path); parser.add_argument("--bundle", type=Path)
-    parser.add_argument("--tools", type=Path, default=ROOT / "build/release-tools")
+    parser.add_argument("operation", choices=("pgp-sign", "manifest-sign")); parser.add_argument("--candidate", type=Path)
+    parser.add_argument("--manifest", type=Path)
     args = parser.parse_args(); policy = json.loads((ROOT / "verification/release-policy.json").read_text())
     try:
-        if args.operation == "pgp-sign":
-            from local_release import pgp_configuration
-            require(args.candidate is not None, "Candidate directory is required")
-            expected = fingerprint(policy["pgp"]["fingerprint"])
-            require(os.environ.get('GITHUB_ACTIONS')!='true','Signing is local-only')
-            private,password,key_id=pgp_configuration()
-            require(key_id is None or expected.endswith(key_id),'Configured local key ID differs from approved fingerprint')
+        from local_release import pgp_configuration
+        expected = fingerprint(policy['pgp']['fingerprint'])
+        require(os.environ.get('GITHUB_ACTIONS')!='true','Signing is local-only')
+        private,password,key_id=pgp_configuration()
+        require(key_id is None or expected.endswith(key_id),'Configured local key ID differs from approved fingerprint')
+        if args.operation == 'pgp-sign':
+            require(args.candidate is not None, 'Candidate directory is required')
             report = sign_assets(args.candidate, private, password, ROOT / policy['pgp']['publicKey'], expected)
         else:
-            require(args.manifest is not None and args.bundle is not None, "Manifest and bundle paths are required")
-            report = sign_sigstore(args.manifest, args.bundle, policy, args.tools)
+            require(args.manifest is not None, 'Manifest path is required')
+            report = sign_manifest(args.manifest,private,password,policy)
         print(json.dumps(report, indent=2)); return 0
     except (ValueError, OSError, KeyError, TypeError) as failure:
         print(json.dumps({"status": "FAILED", "error": str(failure)})); return 1
