@@ -83,7 +83,7 @@ class PublicationTest(unittest.TestCase):
         self.root = Path(self.temp.name); self.version = "1.2.3"
         self.graph = {"version": self.version, "modules": list(MODULES), "components": {}, "dependencies": {}}
         for module in MODULES:
-            directory = self.root / "io/quotaflow" / module / self.version
+            directory = self.root / "io/github/cramen" / module / self.version
             directory.mkdir(parents=True)
             stem = module + "-" + self.version
             for suffix, entries in ((".jar", {"io/quotaflow/Example.class": b"\xca\xfe\xba\xbe\x00"}),
@@ -107,7 +107,7 @@ class PublicationTest(unittest.TestCase):
         self.graph["dependencies"][GROUP + ":quotaflow-core:" + self.version] = [self.slf4j]
 
     def asset(self, module, suffix):
-        return self.root / "io/quotaflow" / module / self.version / (module + "-" + self.version + suffix)
+        return self.root / "io/github/cramen" / module / self.version / (module + "-" + self.version + suffix)
 
     def test_complete_seven_module_candidate_and_runtime_sbom(self):
         binaries, assets = inspect_repository(self.root, self.version, self.graph)
@@ -115,10 +115,20 @@ class PublicationTest(unittest.TestCase):
         self.assertEqual(7, len(binaries)); self.assertEqual(35, len(assets)); self.assertEqual(8, len(sbom["components"]))
         self.assertEqual(self.version, sbom["metadata"]["component"]["version"])
 
+    def test_stale_namespace_and_dependencies_fail(self):
+        old=self.root/'io/quotaflow/old.jar';old.parent.mkdir(parents=True);old.write_bytes(b'old')
+        with self.assertRaisesRegex(ValueError,'namespace'):inspect_repository(self.root,self.version,self.graph)
+        old.unlink()
+        pom=self.asset('quotaflow-config','.pom')
+        text=pom.read_text();text=text.replace('<groupId>io.github.cramen</groupId><artifactId>quotaflow-core',
+                                               '<groupId>io.quotaflow</groupId><artifactId>quotaflow-core')
+        pom.write_text(text)
+        with self.assertRaisesRegex(ValueError,'namespace'):inspect_repository(self.root,self.version,self.graph)
+
     def test_missing_and_internal_modules_fail(self):
-        shutil.rmtree(self.root / "io/quotaflow/quotaflow-config")
+        shutil.rmtree(self.root / "io/github/cramen/quotaflow-config")
         with self.assertRaises(ValueError): inspect_repository(self.root, self.version)
-        (self.root / "io/quotaflow/quotaflow-tck").mkdir()
+        (self.root / "io/github/cramen/quotaflow-tck").mkdir()
         with self.assertRaises(ValueError): inspect_repository(self.root, self.version)
 
     def test_empty_documentation_is_not_publishable(self):
@@ -166,7 +176,7 @@ class CredentialTest(unittest.TestCase):
 
 class GradleBoundaryTest(unittest.TestCase):
     def test_plugin_receives_only_supported_credential_properties_in_isolated_home(self):
-        with tempfile.TemporaryDirectory(prefix="quotaflow-release-gradle-") as directory:
+        with tempfile.TemporaryDirectory(prefix="quotaflow-release-gradle-", ignore_cleanup_errors=True) as directory:
             root = Path(directory); home = root / "gradle-home"; home.mkdir()
             # Reuse immutable/download caches, never user properties or init scripts.
             shared = Path(os.environ.get("GRADLE_USER_HOME", str(Path.home() / ".gradle")))
@@ -183,8 +193,9 @@ class GradleBoundaryTest(unittest.TestCase):
 }''')
             env = {k:v for k,v in os.environ.items() if not k.startswith('ORG_GRADLE_PROJECT_')}
             env.update(credential_environment("central", {"CENTRAL_PORTAL_USERNAME": "fixture-user", "CENTRAL_PORTAL_TOKEN": "fixture-token"}))
-            result = subprocess.run([str(ROOT / "gradlew"), "-g", str(home), "-I", str(init), "verifyReleaseCredentialMapping", "--offline", "--no-daemon", "--console=plain"],
+            result = subprocess.run([str(ROOT / "gradlew"), "-g", str(home), "-I", str(init), "verifyReleaseCredentialMapping", "--no-daemon", "--console=plain"],
                                     cwd=ROOT, env=env, capture_output=True, text=True)
+            subprocess.run([str(ROOT/'gradlew'),'-g',str(home),'--stop'],cwd=ROOT,env=env,capture_output=True)
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
             self.assertIn("Publishing plugin credential mapping verified", result.stdout)
             self.assertNotIn("fixture-token", result.stdout + result.stderr)

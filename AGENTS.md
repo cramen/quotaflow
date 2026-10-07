@@ -6,7 +6,7 @@ Guidance for AI agents and contributors working in this repository.
 
 **Quotaflow** is an enterprise-grade **distributed rate limiting library for JVM microservices**.
 
-Recommended Maven coordinates: groupId `io.quotaflow`, artifact prefix `quotaflow-*`.
+Recommended Maven coordinates: groupId `io.github.cramen`, artifact prefix `quotaflow-*`.
 
 Quotaflow is a **standalone, self-contained library**: it has no dependency on Tiercache or any other sibling project. Design patterns (transport layering, configuration model, starter layout, chaos-test harness) may be borrowed from sibling projects, but code is never shared and release cycles are fully independent.
 

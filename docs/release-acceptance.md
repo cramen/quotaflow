@@ -2,8 +2,7 @@
 
 `scripts/release_acceptance.py` verifies a sealed production candidate without
 publishing. `scripts/publish_release.py` performs one bounded advancement through
-the same checks and the Portal/GitHub state machine. The GitHub workflow now uses
-these entry points with isolated jobs and digest-pinned transfers. Live production
+the same checks and the Portal/GitHub state machine. The operator invokes these entry points locally; GitHub Actions cannot publish. Live production
 identity verification and final candidate certification remain outstanding.
 
 ## Read-only acceptance
@@ -26,8 +25,8 @@ This command requires no Central or GitHub publishing credentials. It verifies:
    project fingerprint and exact approved public-key bytes.
 3. A clean checkout of the exact release tag, full trusted main ancestry and
    matching source identity.
-4. The manifest's Sigstore bundle against the configured repository, workflow,
-   OIDC issuer, tag and full commit SHA.
+4. The manifest's Sigstore bundle against the approved local certificate identity and OIDC issuer, with repository, tag and
+   full commit SHA bound in the signed manifest.
 5. All 16 quality stages from the independently pinned archive and current
    security evidence bound to the same prepared manifest and SBOM.
 6. Complete staged consumer and README example results for that candidate.
@@ -72,9 +71,8 @@ reports certify the executions; the existence of a fixture runner does not.
 
 The publication entry point takes the same candidate and digest arguments. It
 uses Central credentials through the existing canonical Gradle-property mapping
-and `GH_TOKEN` or `GITHUB_TOKEN` for release operations. Invocation performs real
-external operations; use it only for an authorized release in the protected
-promotion environment. Credential-free local work uses
+from local user properties and `GH_TOKEN`, `GITHUB_TOKEN` or `gh auth login` for release operations. Invocation performs real
+external operations; use it only for an authorized release from the local operator machine. Credential-free local work uses
 [release rehearsal](release-rehearsal.md) instead.
 
 The entry point packages the existing sealed files into a deterministic delivery
@@ -86,7 +84,7 @@ bytes before constructing its HTTP request.
 
 A call returns `PENDING` while Central is processing. Resume with the same sealed
 bytes and pinned digests. The append-only GitHub asset journal retains the
-deployment identity across runners. An upload intent with an unknown deployment
+deployment identity across local process failures. An upload intent with an unknown deployment
 ID is not retried automatically; after recovering the original Portal ID, pass
 `--recovered-deployment ID`. Coordinates and bytes must match before recovery.
 

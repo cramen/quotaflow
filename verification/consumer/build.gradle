@@ -8,7 +8,7 @@ def candidate = providers.gradleProperty('candidateVersion').get()
 java { toolchain { languageVersion = JavaLanguageVersion.of(17) } }
 dependencies {
     implementation platform("org.springframework.boot:spring-boot-dependencies:${boot}")
-    implementation "io.quotaflow:quotaflow-spring-boot-starter:${candidate}"
+    implementation "io.github.cramen:quotaflow-spring-boot-starter:${candidate}"
     implementation 'org.springframework.boot:spring-boot-starter-web'
     implementation 'org.springframework.boot:spring-boot-starter-webflux'
 }

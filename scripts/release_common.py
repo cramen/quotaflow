@@ -8,7 +8,7 @@ from urllib.parse import quote
 
 MODULES = tuple("quotaflow-" + name for name in (
     "core", "store-redis", "fallback", "config", "spring-boot-starter", "kotlin", "micrometer"))
-GROUP = "io.quotaflow"
+GROUP = "io.github.cramen"
 SEMVER = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?")
 
 

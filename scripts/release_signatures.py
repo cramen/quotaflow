@@ -88,7 +88,7 @@ def sign_assets(candidate_root, private_key, password, public_key, expected, tes
         import_public(home, public_output, expected)
         secret = home / "signing-key.asc"
         descriptor = os.open(secret, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(descriptor, "wb") as stream: stream.write(private_key.encode())
+        with os.fdopen(descriptor, "wb") as stream: stream.write(private_key.encode() if isinstance(private_key,str) else private_key)
         gpg(home, ["--import", str(secret)]); secret.unlink()
         for reference in required:
             artifact = safe_artifact(root, reference); signature = Path(str(artifact) + ".asc")
@@ -126,8 +126,18 @@ def verify_pgp(candidate_root, report, manifest, expected, production=True):
 
 def sigstore_identity(policy, tag):
     require(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", policy["repository"]), "Invalid repository identity")
-    require(policy["workflow"].startswith(".github/workflows/") and ".." not in Path(policy["workflow"]).parts, "Invalid workflow identity")
-    return "https://github.com/" + policy["repository"] + "/" + policy["workflow"] + "@refs/tags/" + tag
+    identity=policy.get('certificateIdentity')
+    require(isinstance(identity,str) and identity.strip()==identity and identity and not any(c in identity for c in '*\\\n\r'),
+            'Configure the approved exact local Sigstore certificate identity')
+    require(policy.get('oidcIssuer')=='https://oauth2.sigstore.dev/auth','Unexpected local Sigstore issuer')
+    return identity
+
+
+def sigstore_manifest(blob, policy, tag, commit):
+    manifest=json.loads(Path(blob).read_text())
+    require(manifest.get('repository')==policy['repository'] and manifest['candidate']['commit']==commit
+            and 'v'+manifest['candidate']['version']==tag and manifest['mode']=='release',
+            'Signed manifest repository, tag, commit or mode mismatch')
 
 
 def sigstore_environment(tools_directory):
@@ -139,26 +149,25 @@ def sigstore_environment(tools_directory):
 
 def verify_sigstore(blob, bundle, policy, tag, commit, tools_directory):
     require(Path(bundle).is_file(), "Missing Sigstore bundle")
+    sigstore_manifest(blob,policy,tag,commit)
     binary, identity = tool("cosign", tools_directory)
     command = [str(binary), "verify-blob", "--bundle", str(bundle), "--certificate-identity", sigstore_identity(policy, tag),
-               "--certificate-oidc-issuer", policy["oidcIssuer"], "--certificate-github-workflow-repository", policy["repository"],
-               "--certificate-github-workflow-ref", "refs/tags/" + tag, "--certificate-github-workflow-sha", commit, str(blob)]
+               "--certificate-oidc-issuer", policy["oidcIssuer"], str(blob)]
     result = subprocess.run(command, capture_output=True, text=True, env=sigstore_environment(tools_directory))
-    require(result.returncode == 0, "Sigstore signature, transparency evidence or workflow/issuer/commit identity is invalid")
+    require(result.returncode == 0, "Sigstore signature, transparency evidence or local signer/issuer identity is invalid")
     return {"status": "PASS", "tool": identity, "manifestSha256": sha256(blob), "bundleSha256": sha256(bundle),
             "certificateIdentity": sigstore_identity(policy, tag), "issuer": policy["oidcIssuer"], "commit": commit, "tag": tag}
 
 
 def sign_sigstore(blob, bundle, policy, tools_directory):
     manifest = json.loads(Path(blob).read_text()); candidate = manifest["candidate"]; tag = "v" + candidate["version"]
-    expected_ref = policy["repository"] + "/" + policy["workflow"] + "@refs/tags/" + tag
-    require(manifest["mode"] == "release" and os.environ.get("GITHUB_ACTIONS") == "true", "Keyless production signing requires the release workflow")
-    require(os.environ.get("GITHUB_REPOSITORY") == policy["repository"] and os.environ.get("GITHUB_WORKFLOW_REF") == expected_ref
-            and os.environ.get("GITHUB_SHA") == candidate["commit"], "Unexpected keyless signing workflow context")
+    require(os.environ.get('GITHUB_ACTIONS')!='true', 'Signing is local-only')
+    sigstore_identity(policy,tag)
+    sigstore_manifest(blob,policy,tag,candidate['commit'])
     require(not Path(bundle).exists(), "Refusing to replace a Sigstore bundle")
     binary, _ = tool("cosign", tools_directory)
     result = subprocess.run([str(binary), "sign-blob", "--yes", "--bundle", str(bundle), str(blob)],
-                            capture_output=True, text=True, env=sigstore_environment(tools_directory))
+                            env=sigstore_environment(tools_directory))
     require(result.returncode == 0, "Keyless signing failed; credential material is not logged")
     return verify_sigstore(blob, bundle, policy, tag, candidate["commit"], tools_directory)
 
@@ -171,12 +180,13 @@ def main():
     args = parser.parse_args(); policy = json.loads((ROOT / "verification/release-policy.json").read_text())
     try:
         if args.operation == "pgp-sign":
-            from release_common import credential_environment
+            from local_release import pgp_configuration
             require(args.candidate is not None, "Candidate directory is required")
             expected = fingerprint(policy["pgp"]["fingerprint"])
-            environment = credential_environment("pgp")
-            report = sign_assets(args.candidate, environment["ORG_GRADLE_PROJECT_signingInMemoryKey"],
-                                 environment["ORG_GRADLE_PROJECT_signingInMemoryKeyPassword"], ROOT / policy["pgp"]["publicKey"], expected)
+            require(os.environ.get('GITHUB_ACTIONS')!='true','Signing is local-only')
+            private,password,key_id=pgp_configuration()
+            require(key_id is None or expected.endswith(key_id),'Configured local key ID differs from approved fingerprint')
+            report = sign_assets(args.candidate, private, password, ROOT / policy['pgp']['publicKey'], expected)
         else:
             require(args.manifest is not None and args.bundle is not None, "Manifest and bundle paths are required")
             report = sign_sigstore(args.manifest, args.bundle, policy, args.tools)

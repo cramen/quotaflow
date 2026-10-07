@@ -8,7 +8,7 @@ source commit, SBOM and verification evidence to the exact shipped bytes.
 
 The trusted full primary fingerprint and repository-relative public-key path are
 declared in [`verification/release-policy.json`](../verification/release-policy.json).
-The initial production key is not configured yet. A null fingerprint is a blocking
+The existing local production key must match the public policy. A null fingerprint is a blocking
 prerequisite, not a request to trust a key found beside an artifact. Test keys used
 by the verification scripts cannot authorize production publication.
 
@@ -16,7 +16,7 @@ The release owner must review the public key's provenance, commit the approved
 armored public key at the declared path, and replace the null fingerprint with
 its full fingerprint. Publish that key to a Central-supported public key server
 and link its fingerprint from the release notes. Keep the private key and optional
-passphrase exclusively in the signing environment's secrets. Never submit them
+passphrase only in local operator configuration. Never submit them
 in an issue, log, shell command argument or chat.
 
 Obtain the public key from the trusted project checkout, compare its full
@@ -48,15 +48,12 @@ placeholders with the actual version, full commit SHA and file paths:
 ```sh
 cosign verify-blob \
   --bundle MANIFEST.sigstore.json \
-  --certificate-identity 'https://github.com/cramen/quotaflow/.github/workflows/release.yml@refs/tags/vVERSION' \
-  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-  --certificate-github-workflow-repository 'cramen/quotaflow' \
-  --certificate-github-workflow-ref 'refs/tags/vVERSION' \
-  --certificate-github-workflow-sha COMMIT \
+  --certificate-identity 'APPROVED_LOCAL_IDENTITY' \
+  --certificate-oidc-issuer 'https://oauth2.sigstore.dev/auth' \
   MANIFEST.json
 ```
 
-Successful verification must include the expected workflow identity and
+Successful verification must include the approved local signer identity and
 transparency evidence. Do not disable transparency verification, use a permissive
 identity regular expression or substitute an ambient custom trust root.
 After verifying the manifest signature, compare the SHA-256 of every downloaded
@@ -94,4 +91,4 @@ python3 scripts/test_release_promotion.py
 The Sigstore integration control needs the pinned Cosign installation and network
 access for public test data and Sigstore trust metadata. Its vendor fixture has
 a main-branch workflow identity; the production verifier still requires the
-Quotaflow release tag identity shown above.
+approved local identity shown above. Verify repository, commit and version in the signed manifest separately.

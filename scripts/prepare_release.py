@@ -43,6 +43,7 @@ def inspect_pom(path, module, version, graph=None):
                     and not dep_version.endswith("+") and not any(c in dep_version for c in "[]()")
                     and dep_version.upper() not in ("LATEST", "RELEASE"),
                     "Unresolved, dynamic or snapshot publication dependency")
+        require(name not in MODULES or group == GROUP, "Stale inter-module publication namespace")
         if group == GROUP:
             require(name in MODULES and dep_version == version, "Wrong inter-module publication dependency")
 
@@ -65,9 +66,10 @@ def inspect_jar(path, kind):
 
 def inspect_repository(repository, version, graph=None):
     repository = Path(repository)
-    namespace = repository / "io/quotaflow"
+    namespace = repository / "io/github/cramen"
     require(namespace.is_dir(), "Missing publication namespace")
     require({p.name for p in namespace.iterdir() if p.is_dir()} == set(MODULES), "Expected exactly seven public modules")
+    require(all(p.is_relative_to(namespace) for p in repository.rglob("*") if p.is_file()), "Unexpected publication namespace")
     binaries, assets = {}, []
     for module in MODULES:
         parent = namespace / module
@@ -90,6 +92,7 @@ def inspect_repository(repository, version, graph=None):
             for dep in variant.get("dependencies", []) + variant.get("dependencyConstraints", []):
                 selected = dep.get("version", {}).get("requires", dep.get("version", {}).get("strictly", ""))
                 require("snapshot" not in selected.lower(), "Snapshot Gradle dependency")
+                require(dep.get("module") not in MODULES or dep.get("group") == GROUP, "Stale Gradle publication namespace")
                 if dep.get("group") == GROUP:
                     require(dep["module"] in MODULES and selected == version, "Wrong Gradle inter-module version")
         for path in sorted(directory.iterdir()):
@@ -204,7 +207,12 @@ def main():
         if args.operation == "validate-tag":
             report = tag_identity(ROOT, args.tag, args.expected_commit)
         elif args.operation == "check-credentials":
-            report = {"configuredProperties": sorted(credential_environment(args.scope)), "status": "PASS"}
+            from local_release import central_environment,pgp_configuration
+            configured=[]
+            if args.scope in ('central','all'):configured+=sorted(credential_environment('central',central_environment()))
+            if args.scope in ('pgp','all'):
+                pgp_configuration();configured.append('localPgpConfiguration')
+            report = {"configuredProperties": configured, "status": "PASS"}
         else:
             require(args.dry_run or args.tag, "Real candidate preparation requires a release tag")
             report = prepare(args.output, args.version, args.dry_run, args.tag)

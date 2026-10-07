@@ -11,7 +11,7 @@ from release_candidate import reference
 from release_common import require
 from release_tools import ROOT
 
-SUITES=('test_release_preparation','test_release_candidate','test_release_signatures','test_release_security',
+SUITES=('test_local_release','test_release_preparation','test_release_candidate','test_release_signatures','test_release_security',
         'test_release_evidence_gate','test_release_acceptance','test_release_promotion','test_release_transport',
         'test_release_rehearsal','test_release_workflow','test_release_transfer','test_consumer_security','test_staged_runtime')
 

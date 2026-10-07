@@ -65,12 +65,12 @@ def audit(prepared,staged=None,control_report=None,sealed=None,manifest_digest=N
         return {'status':'PASS','manifestSha256':manifest_digest}
     check('productionAcceptance',production)
     def operator_checks():
-        require(operator is not None,'Namespace ownership, protected environments and production identities remain operator prerequisites')
+        require(operator is not None,'Namespace ownership, local authentication and production identities remain operator prerequisites')
         value=json.loads(Path(operator).read_text())
         require(value['candidate']==candidate and value['manifestSha256']==manifest_digest and value['reviewer'].strip(),'Operator review identity mismatch')
         age=dt.datetime.now(dt.timezone.utc)-instant(value['reviewedAt'])
         require(dt.timedelta(0)<=age<=dt.timedelta(days=1),'Operator review is stale or future')
-        required={'namespaceOwnership','protectedTags','signingEnvironment','promotionEnvironment','publishedPgpIdentity','evidenceTransfer'}
+        required={'namespaceOwnership','protectedTags','localSigningConfiguration','localPublishingAuthentication','publishedPgpIdentity','evidenceTransfer'}
         require(set(value['checks'])==required and all(value['checks'][k] is True for k in required),'Operator prerequisites are incomplete')
         return {'status':'PASS','reviewer':value['reviewer']}
     check('operatorPrerequisites',operator_checks)

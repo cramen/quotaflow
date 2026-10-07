@@ -5,8 +5,8 @@ repositories {
 }
 java { toolchain { languageVersion = JavaLanguageVersion.of(21) } }
 dependencies {
-    implementation "io.quotaflow:quotaflow-store-redis:${providers.gradleProperty('candidateVersion').get()}"
-    implementation "io.quotaflow:quotaflow-fallback:${providers.gradleProperty('candidateVersion').get()}"
+    implementation "io.github.cramen:quotaflow-store-redis:${providers.gradleProperty('candidateVersion').get()}"
+    implementation "io.github.cramen:quotaflow-fallback:${providers.gradleProperty('candidateVersion').get()}"
 }
 sourceSets.jmh.java.srcDir '../../quotaflow-fallback/src/testFixtures/java'
 jmh { jmhVersion = '1.37' }

@@ -53,7 +53,7 @@ def verify_prepared(root, manifest, sealed=False):
     require(len(manifest["modules"]) == len(MODULES) and set(manifest["modules"]) == set(MODULES), "Wrong module inventory")
     require(manifest["mode"] != "release" or manifest["tag"] == "v" + version, "Release tag/version mismatch")
     assets = indexed(root, manifest["assets"])
-    require(all(name.startswith("repository/io/quotaflow/") and ".asc" not in Path(name).suffixes for name in assets),
+    require(all(name.startswith("repository/io/github/cramen/") and ".asc" not in Path(name).suffixes for name in assets),
             "Prepared inventory must contain unsigned Maven assets only")
     graph = json.loads(safe_artifact(root, manifest["productionGraph"]).read_text())
     binaries, actual = inspect_repository(root / "repository", version, graph)
@@ -162,7 +162,7 @@ def assemble(prepared, output, reports=None, rehearsal=False):
         bundle = work / ("quotaflow-" + version + "-maven.zip")
         write_archive(bundle, work, maven); verify_archive(bundle, maven)
         sealed = {"schemaVersion": 1, "state": "SEALED_UNVERIFIED", "mode": "rehearsal" if rehearsal else "release",
-                  "eligibleForPromotion": False, "candidate": manifest["candidate"], "modules": list(MODULES),
+                  "repository": "cramen/quotaflow", "eligibleForPromotion": False, "candidate": manifest["candidate"], "modules": list(MODULES),
                   "preparation": reference(work, work / "candidate-manifest.json"), "mavenBundle": reference(work, bundle),
                   "sbom": manifest["sbom"], "reportRoots": report_roots,
                   "pgp": reference(work, work / "signatures/pgp/pgp.json") if pgp else None,

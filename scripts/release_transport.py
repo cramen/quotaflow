@@ -151,9 +151,9 @@ class GitHub:
 
 
 class GitHubJournal:
-    """Append-only, hash-chained release assets survive loss of a CI runner.
+    """Append-only, hash-chained release assets survive loss of the local process.
 
-    One workflow concurrency group per version is mandatory. This is not a
+    The caller must hold the local per-version publication lock. This is not a
     multi-writer database; unexpected concurrent records fail verification.
     """
     prefix = "quotaflow-release-journal-"

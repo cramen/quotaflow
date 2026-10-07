@@ -77,17 +77,23 @@ class SigstoreBoundaryTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="quotaflow-sigstore-control-"); self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name); self.blob = self.root / "manifest.json"; self.bundle = self.root / "signature.json"
-        self.blob.write_text('{"candidate":{"commit":"' + 'a' * 40 + '","version":"1.0.0"},"mode":"release"}')
-        self.bundle.write_text("{}"); self.policy = {"repository": "cramen/quotaflow", "workflow": ".github/workflows/release.yml", "oidcIssuer": "https://token.actions.githubusercontent.com"}
+        self.blob.write_text('{"repository":"cramen/quotaflow","candidate":{"commit":"' + 'a' * 40 + '","version":"1.0.0"},"mode":"release"}')
+        self.bundle.write_text("{}"); self.policy = {"repository": "cramen/quotaflow", "certificateIdentity": "release@example.invalid", "oidcIssuer": "https://oauth2.sigstore.dev/auth"}
 
-    def test_verifier_requires_exact_repository_workflow_issuer_ref_and_commit(self):
+    def test_verifier_requires_exact_local_identity_and_manifest_context(self):
         with patch('release_signatures.tool', return_value=(Path('/approved/cosign'), {"version": "test"})), patch('release_signatures.subprocess.run', return_value=subprocess.CompletedProcess([], 0)) as run:
-            verify_sigstore(self.blob, self.bundle, self.policy, "v1.0.0", "a" * 40, self.root)
-            command = run.call_args.args[0]
-            self.assertIn('https://github.com/cramen/quotaflow/.github/workflows/release.yml@refs/tags/v1.0.0', command)
-            self.assertIn('--certificate-github-workflow-sha', command); self.assertIn('a' * 40, command)
-            self.assertIn('--certificate-github-workflow-ref', command); self.assertIn('refs/tags/v1.0.0', command)
-            self.assertIn(self.policy['oidcIssuer'], command)
+            verify_sigstore(self.blob,self.bundle,self.policy,'v1.0.0','a'*40,self.root)
+            command=run.call_args.args[0]
+            self.assertIn('release@example.invalid',command)
+            self.assertIn(self.policy['oidcIssuer'],command)
+            self.assertNotIn('--certificate-github-workflow-sha',command)
+            for tag,commit in [('v2.0.0','a'*40),('v1.0.0','b'*40)]:
+                with self.assertRaisesRegex(ValueError,'manifest'):
+                    verify_sigstore(self.blob,self.bundle,self.policy,tag,commit,self.root)
+            changed=json.loads(self.blob.read_text());changed['repository']='other/project'
+            self.blob.write_text(json.dumps(changed))
+            with self.assertRaisesRegex(ValueError,'manifest'):
+                verify_sigstore(self.blob,self.bundle,self.policy,'v1.0.0','a'*40,self.root)
 
     def test_missing_bundle_or_failed_crypto_verification_blocks(self):
         with patch('release_signatures.tool', return_value=(Path('/approved/cosign'), {})), patch('release_signatures.subprocess.run', return_value=subprocess.CompletedProcess([], 1)):
@@ -96,10 +102,10 @@ class SigstoreBoundaryTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Missing'): verify_sigstore(self.blob, self.bundle, self.policy, 'v1.0.0', 'a' * 40, self.root)
 
     def test_ambient_trust_overrides_and_non_release_signing_are_refused(self):
-        with patch.dict('os.environ', {'SIGSTORE_ROOT_FILE': '/untrusted/root', 'TUF_MIRROR': 'https://untrusted.invalid', 'GITHUB_ACTIONS': 'false'}):
+        with patch.dict('os.environ', {'SIGSTORE_ROOT_FILE': '/untrusted/root', 'TUF_MIRROR': 'https://untrusted.invalid', 'GITHUB_ACTIONS': 'true'}):
             environment = sigstore_environment(self.root)
             self.assertNotIn('SIGSTORE_ROOT_FILE', environment); self.assertNotIn('TUF_MIRROR', environment)
-            with self.assertRaisesRegex(ValueError, 'release workflow'):
+            with self.assertRaisesRegex(ValueError, 'local-only'):
                 sign_sigstore(self.blob, self.root/'new-bundle.json', self.policy, self.root)
 
 

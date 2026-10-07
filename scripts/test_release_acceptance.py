@@ -121,6 +121,8 @@ class PublicationBoundaryTest(unittest.TestCase):
         self.digest=sha256(self.root/'release-manifest.json'); self.manifest=manifest
         self.github=LocalGitHub(self.fixture.root/'github'); self.portal=LocalPortal(self.fixture.root/'portal',version)
         self.stack=contextlib.ExitStack(); self.addCleanup(self.stack.close)
+        self.stack.enter_context(patch('local_release.Path.home',return_value=self.fixture.root))
+        self.stack.enter_context(patch('local_release.github_token',return_value='test-token'))
         self.stack.enter_context(patch('publish_release.Portal',return_value=self.portal))
         self.stack.enter_context(patch('publish_release.GitHub',return_value=self.github))
         self.stack.enter_context(patch('publish_release.production_identity',return_value={'status':'PASS'}))
@@ -140,7 +142,7 @@ class PublicationBoundaryTest(unittest.TestCase):
             self.assertFalse((self.portal.root/'deployment.zip').exists())
             self.assertFalse((self.github.root/'release.json').exists())
     def test_missing_real_project_key_and_rehearsal_mode_stop_before_clients(self):
-        with patch('publish_release.project_policy',return_value={'pgp':{'fingerprint':None}}), \
+        with patch('publish_release.project_policy',return_value={'repository':'cramen/quotaflow','pgp':{'fingerprint':None}}), \
              patch('publish_release.production_identity',side_effect=production_identity), \
              patch('publish_release.Portal') as portal,patch('publish_release.GitHub') as github:
             with self.assertRaisesRegex(ValueError,'trusted PGP'): self.run_step()

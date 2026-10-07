@@ -57,7 +57,7 @@ class PromotionTest(unittest.TestCase):
         self.root = Path(self.temp.name); self.bundle = self.root/'maven.zip'
         with zipfile.ZipFile(self.bundle, 'w') as archive:
             for module in MODULES:
-                archive.writestr('io/quotaflow/' + module + '/1.0.0/' + module + '-1.0.0.jar', module.encode())
+                archive.writestr('io/github/cramen/' + module + '/1.0.0/' + module + '-1.0.0.jar', module.encode())
         self.manifest = {'candidate': {'version': '1.0.0', 'commit': 'a'*40},
                          'mavenBundle': {'path': 'maven.zip', 'sha256': sha256(self.bundle)}}
         self.digest = hashlib.sha256(encoded(self.manifest)).hexdigest()

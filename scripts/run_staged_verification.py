@@ -87,11 +87,11 @@ def fixture(directory, flavor, tool, version, repository, boot=None):
     versions=tomllib.loads((ROOT/'gradle/libs.versions.toml').read_text())['versions']
     alignment=json.loads((ROOT/'verification/consumer-runtime.json').read_text())
     modules={'core':['core'],'kotlin':['kotlin'],'micrometer':['micrometer'],'redis':['store-redis','fallback'],'starter':['spring-boot-starter']}[flavor]
-    deps=[('io.quotaflow','quotaflow-'+m,version) for m in modules]
+    deps=[('io.github.cramen','quotaflow-'+m,version) for m in modules]
     if flavor=='starter': deps += [('org.springframework.boot','spring-boot-starter-web',None),('org.springframework.boot','spring-boot-starter-webflux',None)]
     if tool=='gradle':
         plugin="plugins { id 'java'"+("; id 'org.jetbrains.kotlin.jvm' version '"+versions['kotlin']+"'" if flavor=='kotlin' else '')+" }\n"
-        build=plugin+f"repositories {{ maven {{ url=uri('{repository}'); content {{ includeGroup 'io.quotaflow' }} }}; mavenCentral {{ content {{ excludeGroup 'io.quotaflow' }} }} }}\n"
+        build=plugin+f"repositories {{ maven {{ url=uri('{repository}'); content {{ includeGroup 'io.github.cramen' }} }}; mavenCentral {{ content {{ excludeGroup 'io.github.cramen' }} }} }}\n"
         build+="java { sourceCompatibility=JavaVersion.VERSION_17; targetCompatibility=JavaVersion.VERSION_17 }\ntasks.withType(JavaCompile).configureEach { options.compilerArgs.add('-parameters') }\n"
         if flavor=='kotlin': build+="kotlin { compilerOptions { jvmTarget=org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17 } }\n"
         build+='dependencies {\n'

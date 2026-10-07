@@ -10,7 +10,7 @@ repositories {
 }
 dependencies {
     implementation platform('org.springframework.boot:spring-boot-dependencies:3.5.16')
-    implementation "io.quotaflow:quotaflow-spring-boot-starter:${providers.gradleProperty('candidateVersion').get()}"
+    implementation "io.github.cramen:quotaflow-spring-boot-starter:${providers.gradleProperty('candidateVersion').get()}"
     implementation stack.get() == 'servlet' ? 'org.springframework.boot:spring-boot-starter-web' : 'org.springframework.boot:spring-boot-starter-webflux'
 }
 // The deterministic primary only supplies control replies. The real fallback owner,

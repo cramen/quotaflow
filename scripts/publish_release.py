@@ -2,7 +2,7 @@
 """Explicit production entry point for one bounded publication advancement.
 
 No build, signing, scan or benchmark is launched here. All inputs must already be
-sealed and independently verified. CI wiring and final certification are separate.
+sealed and independently verified. Local operator authentication and final certification are separate.
 """
 import argparse
 import hashlib
@@ -45,11 +45,19 @@ def verify_delivery(path, manifest, digest, signature_digest):
 
 
 def publish_once(root, digest, pins, recovered_deployment=None):
+    from local_release import publication_lock
+    manifest=verify_sealed(Path(root).resolve(),digest)
+    with publication_lock(project_policy()['repository'],manifest['candidate']['version']):
+        return _publish_once(root,digest,pins,recovered_deployment)
+
+
+def _publish_once(root, digest, pins, recovered_deployment=None):
     root=Path(root).resolve(); manifest=verify_sealed(root,digest); policy=project_policy()
     # Reject rehearsal or an absent project identity before even constructing
     # authenticated clients. Their constructors perform no external operations.
     production_identity(root,manifest,policy)
-    portal=Portal(); github=GitHub(policy['repository'],os.environ.get('GH_TOKEN',os.environ.get('GITHUB_TOKEN','')))
+    from local_release import central_environment, github_token
+    portal=Portal(central_environment()); github=GitHub(policy['repository'],github_token())
     journal=GitHubJournal(github,'v'+manifest['candidate']['version'])
     acceptance={}
     def gates(published):

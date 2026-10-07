@@ -1,15 +1,15 @@
 {
   "schemaVersion": 1,
   "repository": "cramen/quotaflow",
-  "workflow": ".github/workflows/release.yml",
-  "oidcIssuer": "https://token.actions.githubusercontent.com",
+  "oidcIssuer": "https://oauth2.sigstore.dev/auth",
   "pgp": {
     "publicKey": "security/release-public-key.asc",
-    "fingerprint": null
+    "fingerprint": "E4D27CDC864CF8240CBC41117DD76A64DAB4ECF9"
   },
   "vulnerabilities": {
     "maximumDatabaseAgeHours": 24,
     "maximumReportAgeHours": 24,
     "maximumTriageDays": 30
-  }
+  },
+  "certificateIdentity": null
 }

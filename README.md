@@ -29,7 +29,7 @@ versions. Release certification checks the resolved runtime, not only this coord
 
 ```groovy
 dependencies {
-    implementation "io.quotaflow:quotaflow-spring-boot-starter:0.1.0"
+    implementation "io.github.cramen:quotaflow-spring-boot-starter:0.1.0"
 }
 tasks.withType(JavaCompile).configureEach {
     options.compilerArgs.add("-parameters")
@@ -88,9 +88,9 @@ For ordinary Java methods the annotation waits synchronously, including when the
 business method returns `CompletionStage`. Use the supported Reactor return types
 for WebFlux or the Kotlin suspend facade when acquisition must remain nonblocking.
 
-Non-Spring applications use `io.quotaflow:quotaflow-core` plus a store module
+Non-Spring applications use `io.github.cramen:quotaflow-core` plus a store module
 (`quotaflow-store-redis`) with the `quotaflow-fallback` coordinator; coroutine applications use
-`io.quotaflow:quotaflow-kotlin` for the `suspend` API.
+`io.github.cramen:quotaflow-kotlin` for the `suspend` API.
 
 ## Observability
 

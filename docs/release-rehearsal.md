@@ -2,7 +2,7 @@
 
 These commands exercise packaging and publication transitions without a production
 PGP key or publishing credentials. They do not establish production readiness.
-The production workflow uses the integrated entry point; direct Gradle upload
+The local production command uses the integrated entry point; direct Gradle upload
 remains disabled. The separate [production acceptance entry point](release-acceptance.md)
 requires all real evidence and rejects rehearsal output.
 

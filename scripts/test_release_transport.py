@@ -34,10 +34,10 @@ class TransportTest(unittest.TestCase):
                 portal.promote(deployment)
                 self.assertTrue(wire.call_args.args[1].endswith('/deployment/' + deployment))
             with patch('release_transport.request', return_value=b'bytes') as wire:
-                portal.download(deployment, 'io/quotaflow/core.jar')
+                portal.download(deployment, 'io/github/cramen/core.jar')
                 self.assertIn('/deployment/' + deployment + '/download/', wire.call_args.args[1])
-                portal.download(deployment, 'io/quotaflow/core.jar', published=True)
-                self.assertEqual(('GET', 'https://repo.maven.apache.org/maven2/io/quotaflow/core.jar'), wire.call_args.args)
+                portal.download(deployment, 'io/github/cramen/core.jar', published=True)
+                self.assertEqual(('GET', 'https://repo.maven.apache.org/maven2/io/github/cramen/core.jar'), wire.call_args.args)
 
     def test_no_credentials_or_unsafe_paths_never_reach_transport(self):
         with patch('release_transport.request') as wire:

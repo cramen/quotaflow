@@ -52,7 +52,7 @@ def run_examples(prepared,output,work,homes,url,container):
     prepared=Path(prepared); output=Path(output); work=Path(work)
     manifest=json.loads((prepared/'candidate-manifest.json').read_text()); candidate=manifest['candidate']
     readme=(ROOT/'README.md').read_text()
-    require('io.quotaflow:quotaflow-spring-boot-starter:'+candidate['version']+'"' in readme,'README coordinates do not match candidate version')
+    require('io.github.cramen:quotaflow-spring-boot-starter:'+candidate['version']+'"' in readme,'README coordinates do not match candidate version')
     blocks=re.findall(r'```properties\n(.*?)```',readme,re.S)
     require(len(blocks)>=2 and 'quotaflow.defaults.expected-instances=1' in blocks[0], 'README lacks explicit instance count')
     annotations=re.findall(r'@RateLimited\(policy = "tenant-gold"[^\n]*\)',readme)

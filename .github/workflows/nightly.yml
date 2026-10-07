@@ -5,6 +5,9 @@ on:
     - cron: '17 3 * * *'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   # Soak profile (not a per-PR gate): 1 h of sustained mixed traffic with
   # periodic Redis pause/unpause degradation injection, continuous invariant

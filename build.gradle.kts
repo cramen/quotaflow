@@ -32,7 +32,7 @@ subprojects {
         lockAllConfigurations()
         lockMode.set(LockMode.STRICT)
     }
-    group = "io.quotaflow"
+    group = "io.github.cramen"
     // The repository stays on a snapshot version between releases; the release
     // workflow passes -Pversion=<tag without the v prefix>.
     version = providers.gradleProperty("version").orElse("0.1.0-SNAPSHOT").get()
@@ -143,14 +143,8 @@ subprojects {
                 }
             }
 
-            // Signing happens only in the release context: the armored PGP
-            // private key reaches the build exclusively via the
-            // ORG_GRADLE_PROJECT_signingInMemoryKey* environment variables
-            // populated from CI secrets. Without them the Sign tasks skip, so
-            // contributors and snapshot builds never need key material, and a
-            // release without keys publishes nothing (Central rejects unsigned
-            // deployments, and the release workflow does not even attempt the
-            // publish when the secrets are absent).
+            // Candidate preparation is credential-free. Sign the prepared immutable
+            // artifacts explicitly with the local release signing command.
             tasks.withType<Sign>().configureEach {
                 onlyIf("PGP signing key material is present (release context)") {
                     providers.environmentVariable("ORG_GRADLE_PROJECT_signingInMemoryKey").isPresent ||
