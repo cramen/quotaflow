@@ -358,11 +358,30 @@ class ClusterTopologyTckTest {
         }
     }
 
+    private static io.lettuce.core.cluster.api.StatefulRedisClusterConnection<String, String>
+            awaitAdministrationTopology() throws InterruptedException {
+        long deadline = System.nanoTime() + Duration.ofSeconds(15).toNanos();
+        io.quotaflow.core.PolicyConfigurationException lastFailure = null;
+        while (System.nanoTime() < deadline) {
+            clusterClient.reloadPartitions();
+            var connection = clusterClient.connect();
+            try {
+                var primaries = new io.quotaflow.store.redis.RedisNamespaceAdmin(connection).primaryIds();
+                if (primaries.size() == 3) return connection;
+            } catch (io.quotaflow.core.PolicyConfigurationException forming) {
+                lastFailure = forming;
+            }
+            connection.close();
+            Thread.sleep(100);
+        }
+        throw new AssertionError("Cluster administration topology did not stabilize", lastFailure);
+    }
+
     @Test
     void migrationAssessmentIncludesEveryPrimaryShard() throws Exception {
-        // Administration requires a current topology, including roles assigned after startup.
-        clusterClient.reloadPartitions();
-        try (var connection = clusterClient.connect()) {
+        // Slot routing can be ready before all nodes agree on replica roles.
+        // Refresh until the administration guard observes the complete primary set.
+        try (var connection = awaitAdministrationTopology()) {
             var admin = new io.quotaflow.store.redis.RedisNamespaceAdmin(connection);
             var primaries = admin.primaryIds();
             assertEquals(3, primaries.size());
