@@ -251,7 +251,44 @@ Topology scenarios use dedicated local ports 17000–17005 and 17100–17102; ru
 these suites sequentially on one host. Redis/Valkey containers are disposable.
 A 60-second soak is useful for harness diagnostics but reports DIAGNOSTIC and
 cannot satisfy release acceptance. Ordinary `build` includes topology checks and
-excludes the one-hour soak; nightly runs retain its latency and recovery report.
+excludes the one-hour soak. GitHub Actions never starts soak workloads.
+
+### Manual local soak
+
+Install JDK 17 and JDK 21 and start Docker (Docker Desktop on macOS). Run from the
+repository root in a terminal that will remain open; prevent the machine from
+sleeping. The harness owns a disposable Redis container and injects pause/unpause
+failures only into that container. It needs no application Redis or publishing
+credentials. Do not overlap comparative benchmarks with this workload.
+
+For a full release check, retain a fresh log and copy the generated report:
+
+```sh
+soak_output="build/manual-soak/$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "$soak_output"
+printf 'Soak logs: %s\n' "$soak_output"
+./gradlew :quotaflow-tck:soakTest -PtestJdk=21 -PsoakDurationSeconds=3600 \
+  --console=plain > "$soak_output/run.log" 2>&1
+soak_exit=$?
+printf '%s\n' "$soak_exit" > "$soak_output/exit-code.txt"
+if [ "$soak_exit" -eq 0 ]; then
+  cp quotaflow-tck/build/reports/soak/summary.json "$soak_output/summary.json"
+fi
+```
+
+The command takes at least one hour plus preparation. Follow progress from a
+second terminal with `tail -f` on the printed directory's `run.log`. A complete
+run requires exit code `0`, `status: PASS`, at least 3,600 seconds of elapsed load,
+no unexpected exceptions and successful outage/recovery cycles. A missing report,
+interruption or failure is not a pass; retain the log and restart a full run in a
+new directory after resolving the cause. The Gradle task overwrites its generated
+summary, so always keep the copied report alongside that invocation's log.
+
+For a quick setup diagnostic, use `-PsoakDurationSeconds=60`; its `DIAGNOSTIC`
+result cannot certify a release. Final release certification still requires the
+one-hour run captured against the exact candidate with `run_evidence_stage.py`
+as described above. Manual execution changes where soak runs, not its acceptance
+criteria.
 
 ## Recorded implementation verification
 

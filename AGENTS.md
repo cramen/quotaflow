@@ -43,7 +43,7 @@ The only exception is the `research/` folder, which holds the original Russian s
 | `quotaflow-kotlin` | `suspend`/`Flow`/DSL facade, non-blocking semantics |
 | `quotaflow-micrometer` | Observability adapter: Micrometer metric/tracing bridges over the listener SPIs, reference Grafana dashboard and alerts (Micrometer confined to this module) |
 | `quotaflow-native-smoke` | Minimal limiter workload compiled to a native image by the CI native-smoke job, verifying the GraalVM reachability metadata end to end |
-| TCK module | Chaos/conformance tests (races, degradation, boundary burst, dynamic config) plus the soak profile (`soakTest`, on-demand/nightly only) |
+| TCK module | Chaos/conformance tests (races, degradation, boundary burst, dynamic config) plus the soak profile (`soakTest`, manual local execution only) |
 
 Explicit non-goals: no own Redis client, not an API gateway / service mesh, no strong-consistency quotas with distributed transactions, no admin UI (SPI/metrics/REST inspection only).
 

@@ -56,7 +56,7 @@ tasks.withType<Test> {
 // --- Soak profile (D5): NOT part of check — on-demand and nightly only.
 // Sustained mixed traffic with periodic Redis pause/unpause degradation
 // injection and continuous invariant assertions. Default one hour; the
-// nightly workflow runs 1 h and reports environment-specific probe latency.
+// manual local release check runs 1 h and reports environment-specific probe latency.
 tasks.register<JavaExec>("soakTest") {
     group = "verification"
     description = "Runs the soak profile: sustained mixed traffic with periodic degradation injection " +

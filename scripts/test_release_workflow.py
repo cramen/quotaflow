@@ -18,6 +18,11 @@ class WorkflowTest(unittest.TestCase):
             for forbidden in ('publish_release.py','pgp-sign','manifest-sign','CENTRAL_PORTAL_',
                               'secrets.SIGNING_', 'gh release', 'publishAndReleaseToMavenCentral'):
                 self.assertNotIn(forbidden,text)
+    def test_soak_is_manual_and_absent_from_github_workflows(self):
+        self.assertFalse((ROOT/'.github/workflows/nightly.yml').exists())
+        for path in (ROOT/'.github/workflows').glob('*.yml'):
+            self.assertNotRegex(path.read_text(),r'soakTest|SoakHarness|soakDurationSeconds')
+
     def test_benchmarks_remain_local(self):
         for path in (ROOT/'.github/workflows').glob('*.yml'):
             self.assertNotRegex(path.read_text(),r'run_performance|run_benchmark|\bjmh\b|performanceGate|benchmark\.sh')

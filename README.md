@@ -181,4 +181,4 @@ changes. Quotaflow does not change global logging configuration, and its redacti
 guarantee does not cover independently emitted third-party wire dumps.
 
 Verification commands, runtime evidence and external consumer fixtures are documented
-in [the verification workflow](docs/verification.md).
+in [the verification workflow](docs/verification.md). The one-hour soak is run manually on the local machine; see [manual soak instructions](docs/verification.md#manual-local-soak).
