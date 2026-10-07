@@ -17,22 +17,11 @@ import io.quotaflow.core.Scope;
 import io.quotaflow.core.store.LocalRateLimitStore;
 import java.time.Duration;
 import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 class MicrometerWaitMetricsTest {
-
-    private final ExecutorService executor = Executors.newCachedThreadPool();
-
-    @AfterEach
-    void shutdownExecutor() {
-        executor.shutdownNow();
-    }
 
     private static RateLimitPolicy throttlePolicy(String id, long capacity, long refill, Duration period) {
         return RateLimitPolicy.builder(id)
@@ -57,23 +46,24 @@ class MicrometerWaitMetricsTest {
     void waitDurationHistogramRecordsWaitedAndZeroWaitDecisions() throws Exception {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         PolicySet policies = PolicySet.compile(List.of(throttlePolicy("t", 1, 1, Duration.ofMillis(60))));
-        DefaultQuotaFlow flow = DefaultQuotaFlow.builder(policies, new LocalRateLimitStore())
+        var clock = new java.util.concurrent.atomic.AtomicLong();
+        try (var flow = DefaultQuotaFlow.builder(policies, new LocalRateLimitStore(clock::get))
                 .addListener(MicrometerDecisionListener.withStaticLimits(registry, () -> policies))
-                .build();
-
-        flow.tryAcquire("t", RateLimitContext.empty());
-        assertTrue(flow.acquire("t", RateLimitContext.empty(), 1, Duration.ofSeconds(5)).isAllowed());
-
-        flow.flushObservations().toCompletableFuture().orTimeout(2, TimeUnit.SECONDS).join();
-        Timer timer = registry.get(QuotaFlowMetrics.WAIT_DURATION)
-                .tags("policy", "t", "key-group", "global")
-                .timer();
-        // one instant allow (zero wait) and one waited allow
-        assertEquals(2, timer.count());
-        assertTrue(timer.totalTime(TimeUnit.MILLISECONDS) >= 20,
-                "the waited decision must contribute its actual wait, got "
-                        + timer.totalTime(TimeUnit.MILLISECONDS) + " ms");
-        assertTrue(timer.max(TimeUnit.MILLISECONDS) >= 20);
+                .build()) {
+            assertTrue(flow.tryAcquire("t", RateLimitContext.empty()).isAllowed());
+            var pending = flow.acquireAsync("t", RateLimitContext.empty(), 1, Duration.ofSeconds(10)).toCompletableFuture();
+            awaitTrue(() -> flow.waitQueueDepth("t") == 1, Duration.ofSeconds(5), "request is queued");
+            clock.set(Duration.ofMillis(60).toNanos());
+            var decision = pending.get(5, TimeUnit.SECONDS);
+            assertTrue(decision.isAllowed());
+            assertTrue(decision.waitDuration().toNanos() > 0);
+            flow.flushObservations().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            Timer timer = registry.get(QuotaFlowMetrics.WAIT_DURATION)
+                    .tags("policy", "t", "key-group", "global").timer();
+            assertEquals(2, timer.count());
+            assertEquals(decision.waitDuration().toNanos(), timer.totalTime(TimeUnit.NANOSECONDS), 1);
+            assertEquals(decision.waitDuration().toNanos(), timer.max(TimeUnit.NANOSECONDS), 1);
+        }
     }
 
     @Test
@@ -105,31 +95,30 @@ class MicrometerWaitMetricsTest {
     void queueDepthGaugeTracksAccumulationAndDrain() throws Exception {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         PolicySet policies = PolicySet.compile(List.of(
-                throttlePolicy("t", 1, 1, Duration.ofMinutes(1)),
+                throttlePolicy("t", 2, 2, Duration.ofMillis(60)),
                 RateLimitPolicy.builder("r")
                         .limit(new Limit(1, 1, Duration.ofMinutes(1)))
                         .scope(Scope.GLOBAL)
                         .build()));
-        DefaultQuotaFlow flow = DefaultQuotaFlow.builder(policies, new LocalRateLimitStore())
-                .maxWaitersPerPolicy(10)
-                .build();
-        new MicrometerThrottleMetrics(registry, flow, () -> policies);
-
-        // only throttle policies get a depth gauge
-        assertNull(registry.find(QuotaFlowMetrics.WAIT_QUEUE_DEPTH).tags("policy", "r").gauge());
-        var gauge = registry.get(QuotaFlowMetrics.WAIT_QUEUE_DEPTH).tags("policy", "t").gauge();
-        assertEquals(0.0, gauge.value());
-
-        flow.tryAcquire("t", RateLimitContext.empty());
-        Future<?> first = executor.submit(
-                () -> flow.acquire("t", RateLimitContext.empty(), 1, Duration.ofMillis(600)));
-        Future<?> second = executor.submit(
-                () -> flow.acquire("t", RateLimitContext.empty(), 1, Duration.ofMillis(600)));
-        awaitTrue(() -> gauge.value() == 2.0, Duration.ofSeconds(2), "gauge tracks accumulation");
-
-        first.get(5, TimeUnit.SECONDS);
-        second.get(5, TimeUnit.SECONDS);
-        awaitTrue(() -> gauge.value() == 0.0, Duration.ofSeconds(2), "gauge tracks the drain");
+        var clock = new java.util.concurrent.atomic.AtomicLong();
+        try (var flow = DefaultQuotaFlow.builder(policies, new LocalRateLimitStore(clock::get))
+                .maxWaitersPerPolicy(10).build();
+             var metrics = new MicrometerThrottleMetrics(registry, flow, () -> policies)) {
+            assertNull(registry.find(QuotaFlowMetrics.WAIT_QUEUE_DEPTH).tags("policy", "r").gauge());
+            var gauge = registry.get(QuotaFlowMetrics.WAIT_QUEUE_DEPTH).tags("policy", "t").gauge();
+            assertEquals(0.0, gauge.value());
+            assertTrue(flow.tryAcquire("t", RateLimitContext.empty()).isAllowed());
+            assertTrue(flow.tryAcquire("t", RateLimitContext.empty()).isAllowed());
+            var first = flow.acquireAsync("t", RateLimitContext.empty(), 1, Duration.ofSeconds(10)).toCompletableFuture();
+            var second = flow.acquireAsync("t", RateLimitContext.empty(), 1, Duration.ofSeconds(10)).toCompletableFuture();
+            awaitTrue(() -> gauge.value() == 2.0, Duration.ofSeconds(5), "gauge tracks accumulation");
+            // Refill only after observing both waiters, so host scheduling cannot
+            // make the queue disappear before the gauge assertion.
+            clock.set(Duration.ofMillis(60).toNanos());
+            assertTrue(first.get(5, TimeUnit.SECONDS).isAllowed());
+            assertTrue(second.get(5, TimeUnit.SECONDS).isAllowed());
+            awaitTrue(() -> gauge.value() == 0.0, Duration.ofSeconds(2), "gauge tracks the drain");
+        }
     }
 
     @Test void parentBlockedLeafCountsOneWaitAndCancellationHasNoTerminalSample() throws Exception {
