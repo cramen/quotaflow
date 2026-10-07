@@ -45,13 +45,17 @@ public final class RecoveryProcessOwner {
                         case "STATE" -> answer(store.state().name());
                         case "DISCONNECT" -> { connected.set(false); answer("OK"); }
                         case "RECONNECT" -> { connected.set(true); answer("OK"); }
-                        case "TIME" -> {
+                        case "TIME", "TIME_MILLIS" -> {
                             if (!controlled) throw new IllegalStateException("clock control is disabled");
-                            long nanos = TimeUnit.SECONDS.toNanos(Long.parseLong(words[1]));
+                            long nanos = (words[0].equals("TIME") ? TimeUnit.SECONDS : TimeUnit.MILLISECONDS)
+                                    .toNanos(Long.parseLong(words[1]));
                             connection.sync().set(clockKey, Long.toString(nanos)); time.set(nanos); answer("OK");
                         }
-                        case "ACQUIRE" -> {
-                            try { answer(flow.tryAcquire("quota", RateLimitContext.empty(), words.length == 1 ? 1 : Long.parseLong(words[1])).isAllowed() ? "ALLOW" : "REJECT"); }
+                        case "ACQUIRE", "ADMISSION" -> {
+                            try {
+                                var decision = flow.tryAcquire("quota", RateLimitContext.empty(), words.length == 1 ? 1 : Long.parseLong(words[1]));
+                                answer(decision.isAllowed() ? "ALLOW" : words[0].equals("ADMISSION") && decision.retryAfter().isEmpty() ? "PENDING" : "REJECT");
+                            }
                             catch (RuntimeException failure) {
                                 Throwable cause = failure;
                                 while (cause instanceof CompletionException && cause.getCause() != null) cause = cause.getCause();

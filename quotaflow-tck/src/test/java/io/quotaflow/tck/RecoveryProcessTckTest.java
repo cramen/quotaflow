@@ -71,21 +71,50 @@ class RecoveryProcessTckTest extends TckContainers {
             assertEquals("ALLOW", a.command("ACQUIRE 10"));
             assertEquals("OK", a.command("DISCONNECT")); assertEquals("OK", b.command("DISCONNECT"));
             for (Owner owner : List.of(a, b)) {
-                assertEquals("REJECT", owner.command("ACQUIRE")); assertEquals("REJECT", owner.command("ACQUIRE"));
-                assertEquals("OK", owner.command("TIME 1000"));
+                assertEquals("REJECT", owner.command("ACQUIRE"));
+                owner.awaitColdGuard();
             }
+            // Keep both observations live before the handoff. Otherwise A's
+            // untouched entry legitimately expires at its 1000 s horizon plus
+            // the 1 s attempt grace period, destroying the intended A=5 setup.
+            for (Owner owner : List.of(a, b)) assertEquals("OK", owner.command("TIME 500"));
+            for (Owner owner : List.of(a, b)) assertEquals("REJECT", owner.command("ACQUIRE 5"));
+            for (Owner owner : List.of(a, b)) assertEquals("OK", owner.command("TIME 1000"));
             assertEquals("ALLOW", b.command("ACQUIRE 5"));
-            assertEquals("OK", a.command("RECONNECT")); assertEquals("OK", a.command("TIME 1001"));
+            var recoveryMillis = new java.util.concurrent.atomic.AtomicLong(1_000_000);
+            assertEquals("OK", a.command("RECONNECT"));
+            String control = RedisKeyScheme.defaults().controlKey(domain);
+            awaitRecovery(() -> "GATHER".equals(connection.sync().hget(control, "phase"))
+                    && "1".equals(connection.sync().hget(control, "joined")), recoveryMillis, a, b);
+            var bucket = new BucketIdentity(domain, "quota", Scope.GLOBAL, "global");
+            assertEquals(5, Long.parseLong(connection.sync().get(RedisKeyScheme.defaults().singleKey(bucket)).split(":")[3]),
+                    "the joined owner seeds its own five credits, never the fleet multiple");
             for (int token = 0; token < 5; token++) a.await("ACQUIRE", "ALLOW");
             assertEquals("REJECT", a.command("ACQUIRE"));
             assertEquals("OPEN", a.command("STATE"), "one process cannot release the cohort guard");
-            assertEquals("OK", b.command("RECONNECT")); assertEquals("OK", b.command("TIME 1001"));
-            a.await("STATE", "CLOSED"); b.await("STATE", "CLOSED");
+            assertEquals("OK", b.command("RECONNECT"));
+            awaitRecovery(() -> "CLOSED".equals(a.command("STATE")) && "CLOSED".equals(b.command("STATE")), recoveryMillis, a, b);
             assertEquals("REJECT", a.command("ACQUIRE 10")); assertEquals("REJECT", b.command("ACQUIRE 10"));
-            assertEquals("OK", a.command("TIME 1101")); assertEquals("OK", b.command("TIME 1101"));
+            long refilledAt = recoveryMillis.get() + 100_000;
+            assertEquals("OK", a.command("TIME_MILLIS " + refilledAt));
+            assertEquals("OK", b.command("TIME_MILLIS " + refilledAt));
             assertEquals("ALLOW", a.command("ACQUIRE")); assertEquals("REJECT", b.command("ACQUIRE"));
         } finally { processes.forEach(Owner::crash); client.shutdown(); }
     }
+    private static void awaitRecovery(Callable<Boolean> condition,
+                                      java.util.concurrent.atomic.AtomicLong millis, Owner... owners) throws Exception {
+        long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+        while (!condition.call()) {
+            assertTrue(System.nanoTime() < deadline, "recovery barrier did not complete");
+            // Retry backoff uses the controlled clock too. Advancing by less than
+            // one global emission interval cannot conceal an extra admitted token.
+            long next = millis.addAndGet(50);
+            assertTrue(next < 1_090_000, "recovery exceeded the sub-token clock budget");
+            for (Owner owner : owners) assertEquals("OK", owner.command("TIME_MILLIS " + next));
+            Thread.sleep(20);
+        }
+    }
+
     private Owner start(List<Owner> processes, Algorithm algorithm, String id, String members) throws Exception {
         var owner = new Owner(redisUri(), id, members, algorithm); processes.add(owner);
         assertEquals("STARTED", owner.response()); return owner;
@@ -116,6 +145,17 @@ class RecoveryProcessTckTest extends TckContainers {
             long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos(); String actual;
             do { actual = command(command); if (actual.equals(expected)) return; Thread.sleep(20); } while (System.nanoTime() < deadline);
             assertEquals(expected, actual);
+        }
+        void awaitColdGuard() throws Exception {
+            long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+            while (true) {
+                String result = command("ADMISSION");
+                assertNotEquals("ALLOW", result, "a new local observation must remain empty");
+                if (result.equals("REJECT")) return;
+                assertEquals("PENDING", result);
+                assertTrue(System.nanoTime() < deadline, "local guard did not become ready");
+                Thread.sleep(20);
+            }
         }
         void crash() {
             process.destroyForcibly();
