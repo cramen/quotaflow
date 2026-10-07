@@ -59,18 +59,24 @@ class SuspendAcquireTest {
 
     @Test
     fun `throttle wait suspends the coroutine and resumes with the final decision`() = runBlocking {
-        val flow = flowFor(throttlePolicy("t", 1, 1, Duration.ofMillis(50)))
-        assertTrue(flow.tryAcquire("t", context).isAllowed, "first acquisition exhausts the policy")
-
-        val start = System.nanoTime()
-        val decision = flow.acquire("t", context, 1, 5.seconds)
-        val elapsedMillis = (System.nanoTime() - start) / 1_000_000
-
-        assertTrue(decision.isAllowed)
-        assertTrue(decision.waitDuration().toMillis() > 0, "a waited decision carries its wait")
-        assertTrue(
-            elapsedMillis >= 30,
-            "expected a real wait around the 50ms refill period, was ${elapsedMillis}ms")
+        val clock = java.util.concurrent.atomic.AtomicLong()
+        val queued = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val policies = PolicySet.compile(listOf(throttlePolicy("t", 1, 1, Duration.ofMillis(50))))
+        val flow = CoroutineQuotaFlow.builder(policies, LocalRateLimitStore { clock.get() })
+            .addWaitListener { _, _ -> queued.complete(Unit) }
+            .build()
+        try {
+            assertTrue(flow.tryAcquire("t", context).isAllowed, "first acquisition exhausts the policy")
+            val pending = async { flow.acquire("t", context, 1, 5.seconds) }
+            withTimeout(5_000) { queued.await() }
+            assertFalse(pending.isCompleted, "acquisition must suspend while the store clock is frozen")
+            clock.addAndGet(Duration.ofMillis(50).toNanos())
+            val decision = withTimeout(5_000) { pending.await() }
+            assertTrue(decision.isAllowed)
+            assertFalse(decision.waitDuration().isZero, "a queued decision carries its wait")
+        } finally {
+            flow.delegate.close()
+        }
     }
 
     @Test

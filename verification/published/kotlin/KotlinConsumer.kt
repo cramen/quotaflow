@@ -12,11 +12,26 @@ import kotlinx.coroutines.flow.*
 
 fun main() = runBlocking {
     check(Runtime.version().feature() == Integer.getInteger("verification.jdk"))
-    val policies = quotaFlow { policy("kotlin") { scope = Scope.GLOBAL; limit(capacity = 2, refill = 1 every 1.hours) } }
+    val policies = quotaFlow {
+        policy("kotlin") { scope = Scope.GLOBAL; limit(capacity = 2, refill = 1 every 1.hours) }
+        policy("subscription-probe") { scope = Scope.GLOBAL; limit(capacity = 1, refill = 1 every 1.hours) }
+    }
     val flow = CoroutineQuotaFlow.builder(policies, LocalRateLimitStore()).build()
     try {
-        val events = async(start = CoroutineStart.UNDISPATCHED) { flow.decisions().take(3).toList() }
-        yield()
+        val subscribed = CompletableDeferred<Unit>()
+        val events = async(start = CoroutineStart.UNDISPATCHED) {
+            flow.decisions()
+                .onEach { if (it.decision.policyId() == "subscription-probe") subscribed.complete(Unit) }
+                .filter { it.decision.policyId() == "kotlin" }
+                .take(3).toList()
+        }
+        withTimeout(5_000) {
+            while (!subscribed.isCompleted) {
+                flow.tryAcquire("subscription-probe", RateLimitContext.empty())
+                yield()
+            }
+        }
+        println("KOTLIN SUBSCRIPTION VERIFIED")
         check(flow.tryAcquire("kotlin", RateLimitContext.empty()).isAllowed)
         check(flow.tryAcquire("kotlin", RateLimitContext.empty()).isAllowed)
         check(!flow.tryAcquire("kotlin", RateLimitContext.empty()).isAllowed)
