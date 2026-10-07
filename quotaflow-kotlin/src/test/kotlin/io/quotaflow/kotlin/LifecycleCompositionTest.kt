@@ -52,15 +52,24 @@ class LifecycleCompositionTest {
         val unsubscribe = flow.eventBus.subscribe { event.complete(it.decision) }
         var delivered = false
         val waiter = launch(dispatcher) { flow.tryAcquire("p", RateLimitContext.empty()); delivered = true }
-        dispatcher.scheduler.runCurrent()
-        store.next().complete(ChainResult.acquired(0, 9))
-        assertTrue(event.get(2, TimeUnit.SECONDS).isAllowed)
-        waiter.cancel()
-        dispatcher.scheduler.runCurrent()
-        waiter.join()
-        assertFalse(delivered)
-        assertTrue(event.join().isAllowed)
-        unsubscribe()
+        try {
+            dispatcher.scheduler.runCurrent()
+            store.next().complete(ChainResult.acquired(0, 9))
+            assertTrue(event.get(2, TimeUnit.SECONDS).isAllowed)
+            waiter.cancel()
+            dispatcher.scheduler.runCurrent()
+            waiter.join()
+            assertFalse(delivered)
+            assertTrue(event.join().isAllowed)
+        } finally {
+            // Cancellation itself is queued on this manually driven dispatcher.
+            // Drain it even when an earlier assertion fails, or runBlocking can
+            // wait forever for its child instead of reporting the failure.
+            waiter.cancel()
+            dispatcher.scheduler.runCurrent()
+            unsubscribe()
+            flow.delegate.close()
+        }
     }
 
     @Test fun `blocking shared resolver leaves single thread progress and surviving joiner intact`() = runBlocking {

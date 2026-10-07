@@ -36,4 +36,8 @@ dependencies {
 
 tasks.withType<Test> {
     useJUnitPlatform()
+    // A stalled coroutine fixture must fail with an identifiable test name.
+    systemProperty("junit.jupiter.execution.timeout.default", "30 s")
+    systemProperty("junit.jupiter.execution.timeout.thread.mode.default", "separate_thread")
+    testLogging { events("started", "failed", "skipped") }
 }
