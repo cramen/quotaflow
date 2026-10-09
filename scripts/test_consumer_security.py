@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
-from consumer_security import ADVISORY, PACKAGE, CONTEXT, scoped_reviews
+from consumer_security import ADVISORY, PACKAGE, CONTEXT, REVIEW_MARKERS, scoped_reviews
 from release_common import sha256
 from scan_release import artifact_set
 
@@ -15,10 +15,11 @@ class ConsumerReviewTest(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup);self.root=Path(self.temp.name)
         (self.root/'verification').mkdir(); proof=self.root/'guard.java';proof.write_text('fixed guard source')
         self.candidate={'artifacts':{'core.jar':'a'*64}}
-        self.document={'schemaVersion':1,'reviews':[{'advisory':ADVISORY,'purl':PACKAGE,'context':CONTEXT,'decision':'not_reachable',
-                         'candidateArtifactsSha256':artifact_set(self.candidate),'evidence':[{'path':'guard.java','sha256':sha256(proof)}]}]}
-        self.runs=[{'id':'starter-3.5.16-servlet-maven-jdk17','runtime':[{'purl':PACKAGE}]}]
-        self.log='CONSUMER VIEW SAFETY VERIFIED xsltBeans=0 wildcardViewMappings=0\nCONSUMER VIEW SAFETY NEGATIVE CONTROL PASSED\n'
+        self.document={'schemaVersion':1,'reviews':[{'advisory':advisory,'purl':package,'context':CONTEXT,'decision':'not_reachable',
+                         'candidateArtifactsSha256':artifact_set(self.candidate),'evidence':[{'path':'guard.java','sha256':sha256(proof)}]}
+                         for advisory,package in REVIEW_MARKERS]}
+        self.runs=[{'id':'starter-3.5.16-servlet-maven-jdk17','runtime':[{'purl':p} for p in {p for _,p in REVIEW_MARKERS}]}]
+        self.log=''.join(dict.fromkeys(marker for markers in REVIEW_MARKERS.values() for marker in markers))
         root=patch('consumer_security.ROOT',self.root);root.start();self.addCleanup(root.stop)
     def check(self):
         (self.root/'verification/consumer-reachability.json').write_text(json.dumps(self.document))
@@ -38,8 +39,24 @@ class ConsumerReviewTest(unittest.TestCase):
     def test_unreviewed_application_or_package_is_never_waived(self):
         self.runs[0]['id']='application-production'
         with self.assertRaisesRegex(ValueError,'application context'):self.check()
-        self.runs[0]['runtime'][0]['purl']='pkg:maven/org.springframework/spring-webmvc@7.0.8'
+        self.runs[0]['runtime']=[{'purl':'pkg:maven/org.springframework/spring-webmvc@7.0.8'}]
         with self.assertRaisesRegex(ValueError,'does not apply'):self.check()
+
+    def test_every_route_absence_and_negative_control_marker_is_required(self):
+        original=self.log
+        for marker in {m for markers in REVIEW_MARKERS.values() for m in markers}:
+            self.log=original.replace(marker,'')
+            with self.subTest(marker=marker),self.assertRaisesRegex(ValueError,'executable'):self.check()
+        self.log=original
+
+    def test_missing_duplicate_and_unreviewed_advisories_fail(self):
+        original=copy.deepcopy(self.document)
+        for reviews in (original['reviews'][:-1],original['reviews']+[original['reviews'][0]]):
+            self.document['reviews']=reviews
+            with self.assertRaises(ValueError):self.check()
+        self.document=original
+        self.document['reviews'][-1]['advisory']='unreviewed-advisory'
+        with self.assertRaises(ValueError):self.check()
 
 
 if __name__=='__main__':unittest.main()

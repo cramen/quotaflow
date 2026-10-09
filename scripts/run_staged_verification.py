@@ -78,10 +78,11 @@ def fixture(directory, flavor, tool, version, repository, boot=None):
         text=text.replace('"http://localhost:"','"http://127.0.0.1:"')
         # The fixture uses named expressions and must therefore retain parameters.
         text=text.replace('            System.out.println("CONSUMER VERIFIED',
-                          '            io.quotaflow.verification.published.ConsumerViewSafety.negativeControl();\n            io.quotaflow.verification.published.ConsumerViewSafety.verify(context);\n            System.out.println("PUBLISHED CONSUMERS VERIFIED case="+System.getProperty("verification.case"));\n            System.out.println("CONSUMER VERIFIED')
+                          '            io.quotaflow.verification.published.ConsumerViewSafety.negativeControl();\n            io.quotaflow.verification.published.ConsumerViewSafety.verify(context);\n            io.quotaflow.verification.published.ConsumerRouteSafety.negativeControls();\n            io.quotaflow.verification.published.ConsumerRouteSafety.verify(context);\n            System.out.println("PUBLISHED CONSUMERS VERIFIED case="+System.getProperty("verification.case"));\n            System.out.println("CONSUMER VERIFIED')
         (source/original.name).write_text(text)
         shutil.copyfile(ROOT/'verification/published/common/ConsumerViewSafety.java',source/'ConsumerViewSafety.java')
         shutil.copyfile(ROOT/'verification/published/common/ConsumerRecovery.java',source/'ConsumerRecovery.java')
+        shutil.copyfile(ROOT/'verification/published/common/ConsumerRouteSafety.java',source/'ConsumerRouteSafety.java')
     else:
         for path in (ROOT/'verification/published'/flavor).iterdir(): shutil.copyfile(path,source/path.name)
     versions=tomllib.loads((ROOT/'gradle/libs.versions.toml').read_text())['versions']

@@ -8,9 +8,9 @@
       "candidateArtifactsSha256": "f92194921bd0822f2f52bf3e5adb933af450b6e510faf991e43c026a48de4550",
       "decision": "not_reachable",
       "owner": "Quotaflow automated fixture review",
-      "reviewedAt": "2026-10-07T04:21:19.067443+00:00",
+      "reviewedAt": "2026-10-09T17:13:13.882710+00:00",
       "expiresAt": "2026-10-14T04:21:19.067443+00:00",
-      "rationale": "Only the fixed REST compatibility fixtures qualify. Runtime assertions reject XsltView beans, XSLT-capable or unreviewed resolvers and wildcard controller mappings. A real XsltView negative control must fail. This review never covers arbitrary applications or the library production scan. Re-reviewed for the local PGP-only candidate: the runner changes only Maven coordinates and removal of unused signing-tool environment prefixes. REST routes, view guards, negative controls, aligned framework versions and library binary hashes are unchanged; the original expiry is retained.",
+      "rationale": "Only the fixed REST compatibility fixtures qualify. Runtime assertions reject XsltView beans, XSLT-capable or unreviewed resolvers and wildcard controller mappings. A real XsltView negative control must fail. This review never covers arbitrary applications or the library production scan. Re-reviewed for the local PGP-only candidate: the runner changes only Maven coordinates and removal of unused signing-tool environment prefixes. REST routes, view guards, negative controls, aligned framework versions and library binary hashes are unchanged; the original expiry is retained. Re-reviewed with the added route checks: XSLT guards and their negative control are unchanged and still execute. Only the fixed fixture policy was extended; the original expiry remains unchanged.",
       "evidence": [
         {
           "path": "verification/consumer-xslt-review.md",
@@ -26,11 +26,134 @@
         },
         {
           "path": "scripts/consumer_security.py",
-          "sha256": "ebfb02142984bb6cc4b4b331b0b11586da713e017ff0e0a77dd15b72c8c82e95"
+          "sha256": "42b76d68da94cab81c8a8e2754104d1dfe836b66980131f56d2f6c95e391ee21"
         },
         {
           "path": "scripts/run_staged_verification.py",
-          "sha256": "d97a83cd2337eaa10f05884a38496809cc8a6246501cd788bb68bb956a7b535d"
+          "sha256": "88d5e49d13a5ed1d0d33764addda14fc307bc9d6629c3c33d6a62a8f24b14780"
+        },
+        {
+          "path": "verification/consumer-runtime.json",
+          "sha256": "da8c46e47f4dbb4c35fa8fcc6cac553cf93c4c7548ba37816f1db4d5cc4124b9"
+        },
+        {
+          "path": "verification/published/common/ConsumerRecovery.java",
+          "sha256": "3dcbcecc811173dd0d12fdfbe297a7716b14fee25edb6ed508e206d50e154f3a"
+        }
+      ]
+    },
+    {
+      "advisory": "GHSA-j9f9-w8pj-32f8",
+      "purl": "pkg:maven/org.springframework/spring-webmvc@6.2.19",
+      "context": "quotaflow-fixed-rest-consumer-fixtures",
+      "candidateArtifactsSha256": "f92194921bd0822f2f52bf3e5adb933af450b6e510faf991e43c026a48de4550",
+      "decision": "not_reachable",
+      "owner": "Quotaflow automated fixture review",
+      "reviewedAt": "2026-10-09T17:13:13.882710+00:00",
+      "expiresAt": "2026-10-14T04:21:19.067443+00:00",
+      "rationale": "The fixed controllers return constant REST text and never render SSE view fragments or stream attacker-controlled data to other users. Actual runtime checks reject SSE/fragment declarations and registered MVC/WebFlux functional routes. Real unsafe-context negative controls must fail. All 36 starter executions across the advertised Boot/JDK/tool matrix passed these controls. This bounded review does not cover arbitrary applications or the library production scan.",
+      "evidence": [
+        {
+          "path": "verification/consumer-route-review.md",
+          "sha256": "eed38c1161049021c687575b1ecac6176a1909af62540fcaf551204dbf31a9f5"
+        },
+        {
+          "path": "verification/published/common/ConsumerRouteSafety.java",
+          "sha256": "87e1a6b9fc9d9914341ec8eb37e0a9920f9cae7bc8b6a57e759eefcfc635f1de"
+        },
+        {
+          "path": "verification/consumer/src/main/java/io/quotaflow/verification/consumer/CompatibilityApplication.java",
+          "sha256": "0917f7831b314d817a7c056b8b5939f36beadf2f703902b3a6749a9609cc2e73"
+        },
+        {
+          "path": "scripts/consumer_security.py",
+          "sha256": "42b76d68da94cab81c8a8e2754104d1dfe836b66980131f56d2f6c95e391ee21"
+        },
+        {
+          "path": "scripts/run_staged_verification.py",
+          "sha256": "88d5e49d13a5ed1d0d33764addda14fc307bc9d6629c3c33d6a62a8f24b14780"
+        },
+        {
+          "path": "verification/consumer-runtime.json",
+          "sha256": "da8c46e47f4dbb4c35fa8fcc6cac553cf93c4c7548ba37816f1db4d5cc4124b9"
+        },
+        {
+          "path": "verification/published/common/ConsumerRecovery.java",
+          "sha256": "3dcbcecc811173dd0d12fdfbe297a7716b14fee25edb6ed508e206d50e154f3a"
+        }
+      ]
+    },
+    {
+      "advisory": "GHSA-j9f9-w8pj-32f8",
+      "purl": "pkg:maven/org.springframework/spring-webflux@6.2.19",
+      "context": "quotaflow-fixed-rest-consumer-fixtures",
+      "candidateArtifactsSha256": "f92194921bd0822f2f52bf3e5adb933af450b6e510faf991e43c026a48de4550",
+      "decision": "not_reachable",
+      "owner": "Quotaflow automated fixture review",
+      "reviewedAt": "2026-10-09T17:13:13.882710+00:00",
+      "expiresAt": "2026-10-14T04:21:19.067443+00:00",
+      "rationale": "The fixed controllers return constant REST text and never render SSE view fragments or stream attacker-controlled data to other users. Actual runtime checks reject SSE/fragment declarations and registered MVC/WebFlux functional routes. Real unsafe-context negative controls must fail. All 36 starter executions across the advertised Boot/JDK/tool matrix passed these controls. This bounded review does not cover arbitrary applications or the library production scan.",
+      "evidence": [
+        {
+          "path": "verification/consumer-route-review.md",
+          "sha256": "eed38c1161049021c687575b1ecac6176a1909af62540fcaf551204dbf31a9f5"
+        },
+        {
+          "path": "verification/published/common/ConsumerRouteSafety.java",
+          "sha256": "87e1a6b9fc9d9914341ec8eb37e0a9920f9cae7bc8b6a57e759eefcfc635f1de"
+        },
+        {
+          "path": "verification/consumer/src/main/java/io/quotaflow/verification/consumer/CompatibilityApplication.java",
+          "sha256": "0917f7831b314d817a7c056b8b5939f36beadf2f703902b3a6749a9609cc2e73"
+        },
+        {
+          "path": "scripts/consumer_security.py",
+          "sha256": "42b76d68da94cab81c8a8e2754104d1dfe836b66980131f56d2f6c95e391ee21"
+        },
+        {
+          "path": "scripts/run_staged_verification.py",
+          "sha256": "88d5e49d13a5ed1d0d33764addda14fc307bc9d6629c3c33d6a62a8f24b14780"
+        },
+        {
+          "path": "verification/consumer-runtime.json",
+          "sha256": "da8c46e47f4dbb4c35fa8fcc6cac553cf93c4c7548ba37816f1db4d5cc4124b9"
+        },
+        {
+          "path": "verification/published/common/ConsumerRecovery.java",
+          "sha256": "3dcbcecc811173dd0d12fdfbe297a7716b14fee25edb6ed508e206d50e154f3a"
+        }
+      ]
+    },
+    {
+      "advisory": "GHSA-9qf2-26p9-2q2q",
+      "purl": "pkg:maven/org.springframework/spring-webflux@6.2.19",
+      "context": "quotaflow-fixed-rest-consumer-fixtures",
+      "candidateArtifactsSha256": "f92194921bd0822f2f52bf3e5adb933af450b6e510faf991e43c026a48de4550",
+      "decision": "not_reachable",
+      "owner": "Quotaflow automated fixture review",
+      "reviewedAt": "2026-10-09T17:13:13.882710+00:00",
+      "expiresAt": "2026-10-14T04:21:19.067443+00:00",
+      "rationale": "The fixed application defines annotated REST handlers and no functional header-predicate authorization routes. Actual runtime checks reject SSE/fragment declarations and registered MVC/WebFlux functional routes. Real unsafe-context negative controls must fail. All 36 starter executions across the advertised Boot/JDK/tool matrix passed these controls. This bounded review does not cover arbitrary applications or the library production scan.",
+      "evidence": [
+        {
+          "path": "verification/consumer-route-review.md",
+          "sha256": "eed38c1161049021c687575b1ecac6176a1909af62540fcaf551204dbf31a9f5"
+        },
+        {
+          "path": "verification/published/common/ConsumerRouteSafety.java",
+          "sha256": "87e1a6b9fc9d9914341ec8eb37e0a9920f9cae7bc8b6a57e759eefcfc635f1de"
+        },
+        {
+          "path": "verification/consumer/src/main/java/io/quotaflow/verification/consumer/CompatibilityApplication.java",
+          "sha256": "0917f7831b314d817a7c056b8b5939f36beadf2f703902b3a6749a9609cc2e73"
+        },
+        {
+          "path": "scripts/consumer_security.py",
+          "sha256": "42b76d68da94cab81c8a8e2754104d1dfe836b66980131f56d2f6c95e391ee21"
+        },
+        {
+          "path": "scripts/run_staged_verification.py",
+          "sha256": "88d5e49d13a5ed1d0d33764addda14fc307bc9d6629c3c33d6a62a8f24b14780"
         },
         {
           "path": "verification/consumer-runtime.json",

@@ -69,3 +69,14 @@ the library's production scan and does not certify arbitrary Boot 3.5 applicatio
 Applications using the affected feature need vendor-supported patched Spring
 artifacts or a supported Boot 4 line. Keep application-specific reachability and
 security maintenance separate from library compatibility.
+
+The same frozen REST fixture also has [scoped route reachability reviews](../verification/consumer-route-review.md)
+for [CVE-2026-47890](https://spring.io/security/cve-2026-47890/) (SSE view fragments)
+and [CVE-2026-47892](https://spring.io/security/cve-2026-47892/) (functional
+header predicates). Every affected run checks application handler declarations
+and registered functional routes, and must reject real unsafe SSE and MVC/WebFlux
+functional-route negative controls. These reviews are bound to advisory, package
+version, fixed fixture context, source hashes and the exact library binary set.
+They do not lower the security gate or certify arbitrary applications. Applications
+using these features need the corresponding vendor-supported 6.2.20 fixes or a
+fixed supported Spring 7 line (7.0.9 or later), plus their own security review.
