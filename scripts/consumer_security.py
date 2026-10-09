@@ -17,6 +17,13 @@ REVIEW_MARKERS={(ADVISORY,PACKAGE):VIEW_MARKERS,
                ('GHSA-j9f9-w8pj-32f8',WEBFLUX):ROUTE_MARKERS,
                ('GHSA-9qf2-26p9-2q2q',WEBFLUX):ROUTE_MARKERS}
 
+COMMON_PROOFS={'verification/consumer/src/main/java/io/quotaflow/verification/consumer/CompatibilityApplication.java',
+               'scripts/consumer_security.py','scripts/run_staged_verification.py',
+               'verification/consumer-runtime.json','verification/published/common/ConsumerRecovery.java'}
+REVIEW_PROOFS={identity:COMMON_PROOFS | ({'verification/consumer-xslt-review.md','verification/published/common/ConsumerViewSafety.java'}
+              if identity[0]==ADVISORY else {'verification/consumer-route-review.md','verification/published/common/ConsumerRouteSafety.java'})
+              for identity in REVIEW_MARKERS}
+
 
 def scoped_reviews(candidate,runs,read_log):
     document=json.loads((ROOT/'verification/consumer-reachability.json').read_text())
@@ -28,6 +35,9 @@ def scoped_reviews(candidate,runs,read_log):
         require(review['context']==CONTEXT and review['decision']=='not_reachable',
                 'Consumer review is outside the fixed context')
         require(review['candidateArtifactsSha256']==artifact_set(candidate),'Consumer review belongs to different library binaries')
+        require(len(review['evidence'])==len(REVIEW_PROOFS[identity])
+                and {entry['path'] for entry in review['evidence']}==REVIEW_PROOFS[identity],
+                'Missing or unreviewed consumer proof source set')
         for entry in review['evidence']: safe_artifact(ROOT,entry)
         affected=[run for run in runs if any(a['purl']==review['purl'] for a in run['runtime'])]
         require(affected,'Fixed review does not apply to this runtime matrix')

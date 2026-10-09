@@ -26,7 +26,7 @@
         },
         {
           "path": "scripts/consumer_security.py",
-          "sha256": "42b76d68da94cab81c8a8e2754104d1dfe836b66980131f56d2f6c95e391ee21"
+          "sha256": "2501304cd7becbd4e2e7a5bd23f466a3f62bc6a84196e3e64605861c04e6b9c4"
         },
         {
           "path": "scripts/run_staged_verification.py",
@@ -67,7 +67,7 @@
         },
         {
           "path": "scripts/consumer_security.py",
-          "sha256": "42b76d68da94cab81c8a8e2754104d1dfe836b66980131f56d2f6c95e391ee21"
+          "sha256": "2501304cd7becbd4e2e7a5bd23f466a3f62bc6a84196e3e64605861c04e6b9c4"
         },
         {
           "path": "scripts/run_staged_verification.py",
@@ -108,7 +108,7 @@
         },
         {
           "path": "scripts/consumer_security.py",
-          "sha256": "42b76d68da94cab81c8a8e2754104d1dfe836b66980131f56d2f6c95e391ee21"
+          "sha256": "2501304cd7becbd4e2e7a5bd23f466a3f62bc6a84196e3e64605861c04e6b9c4"
         },
         {
           "path": "scripts/run_staged_verification.py",
@@ -149,7 +149,7 @@
         },
         {
           "path": "scripts/consumer_security.py",
-          "sha256": "42b76d68da94cab81c8a8e2754104d1dfe836b66980131f56d2f6c95e391ee21"
+          "sha256": "2501304cd7becbd4e2e7a5bd23f466a3f62bc6a84196e3e64605861c04e6b9c4"
         },
         {
           "path": "scripts/run_staged_verification.py",
