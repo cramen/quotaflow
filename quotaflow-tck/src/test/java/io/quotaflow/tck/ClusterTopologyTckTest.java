@@ -290,14 +290,14 @@ class ClusterTopologyTckTest {
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.EnumSource(Algorithm.class)
     void slotMigrationRedirectionAndReconnectNeverDuplicateTheSharedBudget(Algorithm algorithm) throws Exception {
-        clusterClient.reloadPartitions();
         String namespace = "moved-" + UUID.randomUUID();
         try (var connection = clusterClient.connect();
              var store = new io.quotaflow.testing.RecoveryStoreFixture(connection, RedisStoreConfig.defaults())) {
             var admin = new io.quotaflow.store.redis.RedisNamespaceAdmin(connection);
             admin.provisionFresh(namespace, true);
-            var primaryIds = admin.primaryIds();
-            assertEquals(3, primaryIds.size());
+            // A new connection can observe an older node view than the BeforeEach probe.
+            // Wait only for setup metadata; never retry quota operations during migration.
+            var primaryIds = awaitPrimaryIds(connection);
             var domain = new io.quotaflow.core.store.QuotaDomain(namespace, "parent");
             var parent = new BucketIdentity(domain, "parent", io.quotaflow.core.Scope.GLOBAL, "shared");
             var limit = new Limit(3, 1, Duration.ofHours(1));
@@ -360,6 +360,25 @@ class ClusterTopologyTckTest {
                 new RedisStoreConfig(Duration.ofSeconds(2), Duration.ofSeconds(4)))) {
             for (Algorithm algorithm : Algorithm.values()) HierarchyConformance.verify(store, algorithm);
         }
+    }
+
+    private static java.util.Set<String> awaitPrimaryIds(
+            StatefulRedisClusterConnection<String, String> connection) throws InterruptedException {
+        long deadline = System.nanoTime() + Duration.ofSeconds(15).toNanos();
+        RuntimeException last = null;
+        var admin = new io.quotaflow.store.redis.RedisNamespaceAdmin(connection);
+        do {
+            clusterClient.reloadPartitions();
+            try {
+                var ids = admin.primaryIds();
+                assertEquals(3, ids.size());
+                return ids;
+            } catch (io.quotaflow.core.PolicyConfigurationException | io.lettuce.core.RedisException forming) {
+                last = forming;
+            }
+            Thread.sleep(100);
+        } while (System.nanoTime() < deadline);
+        throw new AssertionError("Cluster primary inventory did not converge on the scenario connection", last);
     }
 
     private static io.lettuce.core.cluster.api.StatefulRedisClusterConnection<String, String>
