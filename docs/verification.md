@@ -106,7 +106,8 @@ python3 scripts/run_consumer_matrix.py \
 
 A passing local matrix is not release approval. The controlled local performance
 profile, reviewed matching baseline, native/soak evidence, reproducibility and
-exact-candidate manifest must all pass the release verification contract.
+exact-candidate manifest must all pass the release verification contract, except
+for the explicitly scoped 0.1.0 performance exception below.
 
 ## Reproducible inputs
 
@@ -126,6 +127,35 @@ python3 scripts/verify_reproducible_core.py \
 
 The command preserves both builds' artifacts, hashes and logs. It requires a
 new output directory so a failed attempt cannot overwrite prior evidence.
+
+## Performance certification exception for 0.1.0
+
+The operator approved release 0.1.0 without performance certification because
+this workstation cannot guarantee isolated resources. Eight valid baseline runs
+and seven candidate runs were retained; four p99 metrics remained INCONCLUSIVE.
+No confirmed regression was established, and no performance pass is claimed.
+
+`verification/release-policy.json` binds the exception to version 0.1.0 and all
+seven approved binary hashes. A different version or binary cannot use it. All
+other quality, security, consumer, signature and operator checks remain required.
+The performance stage records `WAIVED` and `performanceCertified: false`; the
+readiness report exposes the reason under `limitations`. Previous measurements
+remain diagnostic evidence. The normal comparator and its thresholds are unchanged.
+
+Capture the exception with the same evidence-stage wrapper used for other gates:
+
+```sh
+python3 scripts/run_evidence_stage.py --candidate build/release/candidate.json \
+  --kind performance --output build/release/performance-stage \
+  --report build/release/performance-exception.json -- \
+  python3 scripts/record_performance_exception.py \
+  --candidate build/release/candidate.json \
+  --output build/release/performance-exception.json
+```
+
+This command fails unless the checked-in policy covers the exact binary set.
+It does not run benchmarks or convert an inconclusive result to PASS. The
+baseline-review digest remains pinned for retained historical diagnostics.
 
 ## Imported local performance evidence
 

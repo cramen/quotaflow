@@ -11,6 +11,24 @@ REQUIRED = {"runtime-17", "runtime-21", "runtime-25", "core-coverage", "core-mut
             "soak", "reproducibility", "performance", "negative-controls"}
 
 
+RELEASE_POLICY = Path(__file__).resolve().parents[1] / 'verification/release-policy.json'
+
+
+def performance_exception(candidate):
+    """Resolve a version-and-binary-bound operator decision from trusted project policy."""
+    policy = json.loads(RELEASE_POLICY.read_text())
+    exception = policy.get('performanceException')
+    require(isinstance(exception, dict), 'No approved performance exception')
+    require(candidate['version'] == exception['version']
+            and len(candidate['artifacts']) == 7
+            and candidate['artifacts'] == exception['artifacts'],
+            'Performance exception does not cover these release binaries')
+    require(isinstance(exception['reason'], str) and exception['reason'].strip(),
+            'Performance exception lacks a reason')
+    return {'status': 'WAIVED', 'performanceCertified': False, 'candidate': candidate,
+            'policySha256': digest(RELEASE_POLICY), 'reason': exception['reason']}
+
+
 def junit(paths):
     count, names = 0, set()
     for path in paths:
@@ -106,6 +124,11 @@ def validate_stage(root, kind, stage, candidate, baseline_digest):
         return report
     if kind == "performance":
         manifest = paths[0]
+        value = json.loads(manifest.read_text())
+        if value.get('status') == 'WAIVED':
+            approved = performance_exception(candidate)
+            require(value == approved, 'Performance exception report differs from approved policy or candidate')
+            return approved
         report = verify_performance(manifest.parent, digest(manifest), candidate, baseline_digest)
         require(report["comparison"] == "PASS", "Performance is not certified: " + report["comparison"])
         return report

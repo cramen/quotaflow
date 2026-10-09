@@ -82,7 +82,8 @@ python3 scripts/release_evidence_gate.py \
   --baseline-review-sha256 BASELINE_REVIEW_SHA256
 ```
 
-All 16 quality stages must identify the same commit, source digest, version and
+All 16 quality stages (including explicit WAIVED performance evidence only for
+the policy-approved 0.1.0 binaries) must identify the same commit, source digest, version and
 library hashes. The security scan must also bind the same prepared manifest and
 SBOM, remain current and have no unresolved findings. This command reports only
 quality/security acceptance; production signature, consumer, example and operator

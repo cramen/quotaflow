@@ -9,5 +9,19 @@
     "maximumDatabaseAgeHours": 24,
     "maximumReportAgeHours": 24,
     "maximumTriageDays": 30
+  },
+  "performanceException": {
+    "version": "0.1.0",
+    "artifacts": {
+      "quotaflow-core-0.1.0.jar": "9ebd49a617e923213b3cf5b18532b83015ff2551529b98bf109fa5dcab500bd3",
+      "quotaflow-store-redis-0.1.0.jar": "ed0132fc766e2dbe28c7307025cd161b7db5a9c46aea40338d396515e9118ef3",
+      "quotaflow-fallback-0.1.0.jar": "3906af7bf579f1f81bd2f466495a2eee35536b34bf2a747dab22fcb0cb367a00",
+      "quotaflow-config-0.1.0.jar": "bbf16e8bb99263df743491b3a08ce10d34e8b0185f182efaaaa70b5f6d8353da",
+      "quotaflow-spring-boot-starter-0.1.0.jar": "eeae0cb1b3a17a188112418c0eca40515d445fb25ce6a1d1a6fb1d686d4e8d7f",
+      "quotaflow-kotlin-0.1.0.jar": "fc913d6f5f0b47b0a93f4b261e88941b65b07d24c240cfa48bbce20e9035e47c",
+      "quotaflow-micrometer-0.1.0.jar": "f2889bea9d32725ac659f97f6b1cc43691e93f5aa8e8818783ce5038677ca687"
+    },
+    "authorizedAt": "2026-10-09",
+    "reason": "The operator approved releasing 0.1.0 without performance certification because the available workstation cannot guarantee isolated resources. Retained benchmark results are inconclusive diagnostics, not a performance pass."
   }
 }

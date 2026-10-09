@@ -34,7 +34,10 @@ This command requires no Central or GitHub publishing credentials. It verifies:
 The command does not generate evidence, rebuild, sign or execute benchmarks.
 Missing production key configuration fails explicitly. A rehearsal package or
 test-signature report is rejected, including if all its local tests passed.
-No option disables a required gate.
+No command-line option disables a required gate. The checked-in 0.1.0
+performance-only exception is restricted to the approved binary hashes; it
+produces an explicit WAIVED result, not performance PASS. All other stages remain
+mandatory. See [the exception and evidence command](verification.md#performance-certification-exception-for-010).
 
 ## Staged evidence contract
 

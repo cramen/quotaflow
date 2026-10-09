@@ -97,6 +97,72 @@ class ReleaseEvidenceTest(unittest.TestCase):
         change(stage)
         self.manifest["stages"][kind] = self.write(ref["path"], stage)
 
+    def approve_performance_exception(self):
+        from unittest.mock import patch
+        from verify_release_evidence import performance_exception
+        self.candidate['artifacts'].update({f'fixture-{i}.jar': str(i) * 64 for i in range(6)})
+        policy = self.root / 'trusted-policy.json'
+        policy.write_text(json.dumps({'performanceException': {
+            'version': self.candidate['version'], 'artifacts': self.candidate['artifacts'],
+            'reason': 'Explicit synthetic operator exception'}}))
+        self.policy_patch = patch('verify_release_evidence.RELEASE_POLICY', policy)
+        self.policy_patch.start(); self.addCleanup(self.policy_patch.stop)
+        for kind in REQUIRED:
+            self.alter_stage(kind, lambda stage: stage.update(candidate=copy.deepcopy(self.candidate)))
+        report = performance_exception(self.candidate)
+        reference = self.write('performance/exception.json', report)
+        self.alter_stage('performance', lambda stage: stage.update(reports=[reference]))
+        return policy
+
+    def test_approved_exception_is_waived_not_performance_pass(self):
+        self.approve_performance_exception()
+        result = self.check()
+        self.assertEqual('PASS', result['status'])
+        self.assertEqual('WAIVED', result['stages']['performance']['status'])
+        self.assertFalse(result['stages']['performance']['performanceCertified'])
+
+    def test_readiness_surfaces_the_performance_limitation(self):
+        from release_readiness import performance_limitations
+        self.approve_performance_exception()
+        quality = self.check()
+        limitations = performance_limitations({'gates': {'quality': quality}})
+        self.assertEqual([{'check': 'performance', 'status': 'WAIVED',
+                           'performanceCertified': False,
+                           'reason': 'Explicit synthetic operator exception'}], limitations)
+        self.assertEqual([], performance_limitations(None))
+
+    def test_exception_cannot_skip_any_other_gate(self):
+        self.approve_performance_exception()
+        for kind in REQUIRED - {'performance'}:
+            with self.subTest(kind=kind):
+                saved = self.manifest['stages'].pop(kind)
+                with self.assertRaises(ValueError): self.check()
+                self.manifest['stages'][kind] = saved
+
+    def test_exception_requires_exact_binaries_and_version(self):
+        from verify_release_evidence import performance_exception
+        self.approve_performance_exception()
+        for field, value in [('version', 'other'), ('artifacts', {'other.jar': 'f' * 64})]:
+            candidate = copy.deepcopy(self.candidate); candidate[field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError): performance_exception(candidate)
+        candidate = copy.deepcopy(self.candidate)
+        candidate['artifacts'][next(iter(candidate['artifacts']))] = 'f' * 64
+        with self.assertRaises(ValueError): performance_exception(candidate)
+
+    def test_exception_rejects_unapproved_or_changed_report(self):
+        policy = self.approve_performance_exception()
+        original = (self.root / 'performance/exception.json').read_text()
+        for field, value in [('reason', 'Changed'), ('policySha256', 'f' * 64),
+                             ('performanceCertified', True), ('candidate', {})]:
+            report = json.loads(original); report[field] = value
+            ref = self.write('performance/exception.json', report)
+            self.alter_stage('performance', lambda stage: stage.update(reports=[ref]))
+            with self.subTest(field=field), self.assertRaises(ValueError): self.check()
+        ref = self.write('performance/exception.json', json.loads(original))
+        self.alter_stage('performance', lambda stage: stage.update(reports=[ref]))
+        policy.write_text('{}')
+        with self.assertRaises(ValueError): self.check()
+
     def test_complete_bundle_passes(self):
         self.assertEqual("PASS", self.check()["status"])
 

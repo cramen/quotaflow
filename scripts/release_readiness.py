@@ -37,6 +37,14 @@ def controls(path,candidate):
     return {'status':'PASS','tests':sum(s['tests'] for s in report['suites'])}
 
 
+def performance_limitations(acceptance):
+    if acceptance:
+        performance=acceptance['gates']['quality']['stages']['performance']
+        if performance.get('status')=='WAIVED':
+            return [{'check':'performance','status':'WAIVED','performanceCertified':False,'reason':performance['reason']}]
+    return []
+
+
 def audit(prepared,staged=None,control_report=None,sealed=None,manifest_digest=None,pins=None,operator=None):
     prepared=Path(prepared).resolve();manifest=json.loads((prepared/'candidate-manifest.json').read_text());candidate=manifest['candidate']
     checks={};acceptance=None
@@ -78,7 +86,8 @@ def audit(prepared,staged=None,control_report=None,sealed=None,manifest_digest=N
                     'requiredQualityStages':stages} for name,stages in COVERAGE.items()}
     coverage['Publishing integrity and recovery']={'status':checks['releaseControls']['status'],'evidence':'releaseControls'}
     ready=all(value['status']=='PASS' for value in checks.values()) and all(value['status']=='PASS' for value in coverage.values())
-    return {'schemaVersion':1,'status':'READY' if ready else 'UNVERIFIED','candidate':candidate,'checks':checks,'auditCoverage':coverage,
+    limitations=performance_limitations(acceptance)
+    return {'schemaVersion':1,'limitations':limitations,'status':'READY' if ready else 'UNVERIFIED','candidate':candidate,'checks':checks,'auditCoverage':coverage,
             'unmet':[name for name,value in checks.items() if value['status']!='PASS']}
 
 
@@ -93,4 +102,4 @@ if __name__=='__main__':
     result=audit(args.prepared,args.staged,args.controls,args.sealed,args.sha256,pins,args.operator_checks)
     args.output.parent.mkdir(parents=True,exist_ok=True)
     with args.output.open('x') as output:output.write(json.dumps(result,indent=2)+'\n')
-    print(json.dumps({'status':result['status'],'unmet':result['unmet']}))
+    print(json.dumps({'status':result['status'],'unmet':result['unmet'],'limitations':result['limitations']}))
